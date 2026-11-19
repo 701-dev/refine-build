@@ -35,6 +35,8 @@ public program_missing: atom
 public program_unstarted: atom
 public step_failed: atom
 public tree_unhashable: atom
+public store_unusable: atom
+public store_nowhere: atom
 
 --- One kind of thing the tool refuses.
 public code: type =
@@ -42,18 +44,19 @@ public code: type =
     keyword_unknown | line_shape | said_twice | package_name | line_missing |
     not_fetched | rule_runs_nothing | placeholder | name_unknown |
     steps_circle | input_unknown | step_shadows_path | program_missing |
-    program_unstarted | step_failed | tree_unhashable
+    program_unstarted | step_failed | tree_unhashable | store_unusable |
+    store_nowhere
 
 --- No code is spelled that way.
 public unknown: atom
 
 --- Every code, in the order `refine-build explain` lists them.
-all: [21]code = [command_line, file_unread, host_refused, no_refine,
+all: [23]code = [command_line, file_unread, host_refused, no_refine,
                  line_unreadable, keyword_unknown, line_shape, said_twice,
                  package_name, line_missing, not_fetched, rule_runs_nothing,
                  placeholder, name_unknown, steps_circle, input_unknown,
                  step_shadows_path, program_missing, program_unstarted,
-                 step_failed, tree_unhashable]
+                 step_failed, tree_unhashable, store_unusable, store_nowhere]
 
 --- How many codes there are.
 public count: () -> (number: usize) =
@@ -100,6 +103,8 @@ public spelled: (which: code) -> (spelling: []u8) =
         program_unstarted: spelling = "RB0402"
         step_failed: spelling = "RB0403"
         tree_unhashable: spelling = "RB0501"
+        store_unusable: spelling = "RB0601"
+        store_nowhere: spelling = "RB0602"
     end match
 end spelled
 
@@ -237,6 +242,23 @@ public about: (which: code) -> (words: []u8) =
             whose target is longer than 4096 bytes, or it was named as a
             tree's root and is no directory. Remove it, or leave the
             directory that holds it out of what is hashed.
+            """
+        store_unusable: words = """
+            The store keeps what steps made, so that a step whose program
+            and inputs are the same as before is not run again. The
+            directory named is no store this refine-build can use: its
+            `version` file names another form, written by another version
+            of the tool, or it holds entries and names no form at all. Use
+            the version of the tool that wrote it, name another directory
+            with `--store PATH`, or remove the directory: everything in a
+            store can be made again, and its entries are read-only, so
+            `chmod -R u+w` it first.
+            """
+        store_nowhere: words = """
+            The store is per user: `$XDG_CACHE_HOME/landin/store` when that
+            variable holds an absolute path, and else
+            `$HOME/.cache/landin/store`. Neither variable says where, so
+            name the store's directory with `--store PATH`.
             """
     end match
 end about

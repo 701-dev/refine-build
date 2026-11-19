@@ -1,0 +1,426 @@
+-- The store: what steps made, kept by content, so that a step whose
+-- program and inputs are what they were is not run again.
+--
+-- It is one directory per user, `$XDG_CACHE_HOME/landin/store` or else
+-- `$HOME/.cache/landin/store`, unless `--store PATH` names another:
+--
+--     version          the 15 bytes `landin-store-1` and a line feed
+--     entries/HASH/    one output: a directory tree, named by the 64
+--                      hexadecimal digits of its content hash (see
+--                      `hash/tree`) and read-only once it is here
+--     keys/KEY         what a step made: see below
+--     tmp/NAME/        an output being written, under a random name
+--     lock             the file whose lock guards a rename into `entries`
+--                      or `keys`
+--
+-- An entry is the same content whoever made it, so an output whose hash
+-- is already an entry is dropped and the entry stands.  Nothing under
+-- `tmp` is ever read as an entry: an output becomes one by a rename, in
+-- one step, after it is whole.
+--
+-- A key file says what the step with that key made and said.  KEY is the
+-- 64 hexadecimal digits of the step's key (see `steps/keys.ldn`), and the
+-- file is these bytes:
+--
+--     the 13 bytes `landin-key-1` and a line feed
+--     the 64 hexadecimal digits of the entry's hash, and a line feed
+--     the 6 bytes `exit 0` and a line feed: only a step that ended with 0
+--                      has a key
+--     then one record for every piece the step's program wrote, in the
+--     order it was read:
+--
+--         one byte      `o` standard output, `e` standard error
+--         eight bytes   the length of the piece, most significant first
+--         the piece
+--
+-- A key file that is not of this form, or names an entry that is gone,
+-- is as good as none: the step runs and the file is written anew.
+--
+-- The lock is held for the renames and for taking an output's write
+-- permission, and never while a step runs.  Two builds that make the same
+-- key at once both run the step, and one result stands.
+
+import core/failure
+import core/io
+import core/text
+import core/vec
+import hosted/blocking
+import platform/posix
+import dev701/refine_build/codes
+import dev701/refine_build/files
+import dev701/refine_build/hash/sha256
+import dev701/refine_build/hash/tree
+import dev701/refine_build/lifetime
+import dev701/refine_build/report
+import dev701/refine_build/text/strings
+
+--  The store's form, which its `version` file holds.
+form: []u8 = "landin-store-1\n"
+--  A key file's form, which it starts with.
+key_form: []u8 = "landin-key-1\n"
+--  What follows the entry's hash in a key file.
+ended_well: []u8 = "exit 0\n"
+
+--- An open store: its directory's absolute path.
+public store: type = struct
+    root: []u8
+end store
+
+--- One piece of what a step's program wrote, and to which stream.
+public piece: type = struct
+    errors: bool
+    bytes: []u8
+end piece
+
+--- What a key file says: the entry the step made, and what it wrote.
+public kept: type = struct
+    entry: sha256.digest
+    said: vec.list(piece)
+end kept
+
+--- The store has nothing usable under a key.
+public unknown: atom
+
+--- Open the store at `given`, or the user's own when `given` is empty,
+--- making it when it is not there.  One of another form is refused.  What
+--- this returns lives as long as `memory`.
+public open: (host: blocking.host, memory: lifetime.memory, given: []u8)
+             -> (opened: store) ! report.refused =
+    root: []u8 = try place(host, memory, given)
+    opened = (root: root)
+    marker: []u8 = try glued(host, memory, [root, "/version"])
+    mut written: []u8 = try version(host, memory, marker)
+    if lenof written == 0 then
+        --  A store being made has its version before its entries, so one
+        --  with entries and no version was not made by this tool; look
+        --  twice, since another build may be making it now.
+        entries: files.found =
+            try kind(host, try glued(host, memory, [root, "/entries"]))
+        if entries <> files.absent then
+            written = try version(host, memory, marker)
+            if lenof written == 0 then
+                report.say(host, codes.store_unusable,
+                           ["the directory `", root,
+                            "` holds `entries` and no `version`, so it is no store of this refine-build; name another with `--store PATH`, or remove it"])
+                fail report.refused
+            end if
+        end if
+    end if
+    try made(host, try glued(host, memory, [root, "/tmp"]))
+    if lenof written == 0 then
+        name: [16]u8 = try named(host)
+        fresh_marker: []u8 = try glued(host, memory,
+                                       [root, "/tmp/", name[0..<16],
+                                        ".version"])
+        files.write_all(host, fresh_marker, [form]) else (problem)
+            gave_up(host, fresh_marker, problem)
+            fail report.refused
+        end
+        files.rename(fresh_marker, marker) else (problem)
+            said(host, marker, problem)
+            fail report.refused
+        end
+        written = form
+    end if
+    if not strings.same(written, form) then
+        mut shown: []u8 = written
+        cut: usize = strings.find(shown, u8('\n'))
+        shown = shown[0..<cut]
+        report.say(host, codes.store_unusable,
+                   ["the store at `", root, "` is of the form `", shown,
+                    "`, and this refine-build keeps `landin-store-1`; use the tool that wrote it, name another store with `--store PATH`, or remove the directory"])
+        fail report.refused
+    end if
+    try made(host, try glued(host, memory, [root, "/entries"]))
+    try made(host, try glued(host, memory, [root, "/keys"]))
+end open
+
+--- The path of the entry whose hash is `sum`, living as long as `memory`.
+public entry_path: (host: blocking.host, memory: lifetime.memory,
+                    opened: store, sum: sha256.digest)
+                   -> (path: []u8) ! report.refused =
+    spelled: sha256.spelling = sha256.hex(sum)
+    path = try glued(host, memory, [opened.root, "/entries/", spelled[0..<64]])
+end entry_path
+
+--- A new empty directory under the store's `tmp`, for a step to write its
+--- output into.  Its path lives as long as `memory`.
+public fresh: (host: blocking.host, memory: lifetime.memory, opened: store)
+              -> (path: []u8) ! report.refused =
+    name: [16]u8 = try named(host)
+    path = try glued(host, memory, [opened.root, "/tmp/", name[0..<16]])
+    try made(host, path)
+end fresh
+
+--- Make the directory `output`, which `fresh` gave and a step filled, an
+--- entry, and say its hash.  When the store has that entry already, the
+--- output is removed and the entry stands.  The memory this needs is taken
+--- from `parent` and given back; `memory` is for paths.
+public admit: (host: blocking.host, parent: lifetime.parent,
+               memory: lifetime.memory, opened: store, output: []u8)
+              -> (sum: sha256.digest) ! report.refused =
+    nothing: [][]u8 = []
+    sum = try tree.of_tree(host, parent, output, nothing)
+    place_of: []u8 = try entry_path(host, memory, opened, sum)
+    spare: bool = try placed(host, memory, opened, output, place_of)
+    if spare then
+        files.remove_all(host, memory, output) else (problem)
+            gave_up(host, output, problem)
+            fail report.refused
+        end
+    end if
+end admit
+
+--  Under the lock: when `place_of` is taken, say that `output` is spare;
+--  or else take the write permission from what `output` holds, give it the
+--  name `place_of`, and take the permission from the directory itself.
+placed: (host: blocking.host, memory: lifetime.memory, opened: store,
+         output: []u8, place_of: []u8) -> (spare: bool) ! report.refused =
+    spare = false
+    held_by: posix.descriptor = try locked(host, memory, opened)
+    defer files.unlock(held_by)
+    there: files.found = try kind(host, place_of)
+    if there <> files.absent then
+        spare = true
+        return
+    end if
+    files.seal(host, memory, output, false) else (problem)
+        said(host, output, problem)
+        fail report.refused
+    end
+    files.rename(output, place_of) else (problem)
+        said(host, place_of, problem)
+        fail report.refused
+    end
+    posix.change_mode_at(posix.working_directory, text_of(place_of), 0o555)
+        else (problem)
+        said(host, place_of, problem)
+        fail report.refused
+    end
+end placed
+
+--- Write the key file of `key`: the step made `entry` and wrote `said`.
+--- A file already under that key is replaced in one step.
+public note: (host: blocking.host, memory: lifetime.memory, opened: store,
+              key: sha256.digest, entry: sha256.digest, said_then: []piece)
+             -> none ! report.refused =
+    name: [16]u8 = try named(host)
+    draft: []u8 = try glued(host, memory,
+                            [opened.root, "/tmp/", name[0..<16], ".key"])
+    spelled: sha256.spelling = sha256.hex(entry)
+    written: io.file = io.open_write(host, text_of(draft)) else (problem)
+        gave_up(host, draft, problem)
+        fail report.refused
+    end
+    mut sound: bool = true
+    head: [4][]u8 = [key_form, spelled[0..<64], "\n", ended_well]
+    for part in head do
+        io.write(host, written, part) else begin sound = false end
+    end for
+    for item in said_then do
+        mut front: [9]u8 = zeroed
+        front[0] = if item.errors then u8('e') else u8('o') end if
+        length: u64 = u64(lenof item.bytes)
+        for at in usize(0)..<8 do
+            front[at + 1] = u8((length >> u64(56 - 8 * at)) & 0xff)
+        end for
+        io.write(host, written, front[0..<9]) else begin sound = false end
+        io.write(host, written, item.bytes) else begin sound = false end
+    end for
+    io.close(host, written) else begin sound = false end
+    if not sound then
+        report.say(host, codes.host_refused,
+                   [draft, ": could not be written whole"])
+        fail report.refused
+    end if
+    named_key: sha256.spelling = sha256.hex(key)
+    final: []u8 = try glued(host, memory,
+                            [opened.root, "/keys/", named_key[0..<64]])
+    held_by: posix.descriptor = try locked(host, memory, opened)
+    defer files.unlock(held_by)
+    files.rename(draft, final) else (problem)
+        said(host, final, problem)
+        fail report.refused
+    end
+end note
+
+--- What the store keeps under `key`: the entry, which is there, and what
+--- the step wrote.  Everything lives as long as `memory`.
+public known: (host: blocking.host, memory: lifetime.memory, opened: store,
+               key: sha256.digest) -> (found: kept) ! unknown =
+    found = (entry: zeroed, said: vec.new(item: piece))
+    named_key: sha256.spelling = sha256.hex(key)
+    path: []u8 = strings.joined(memory, [opened.root, "/keys/",
+                                         named_key[0..<64]]) else (problem)
+        _ = problem
+        fail unknown
+    end
+    content: []u8 = files.read_all(host, memory, path) else (problem)
+        _ = problem
+        fail unknown
+    end
+    fail unknown when not strings.starts(content, key_form)
+    mut at: usize = lenof key_form
+    fail unknown when lenof content < at + 65 + lenof ended_well
+    for index in usize(0)..<32 do
+        high: u8 = try digit(content[at + 2 * index])
+        low: u8 = try digit(content[at + 2 * index + 1])
+        found.entry[index] = (high << 4) | low
+    end for
+    at += 64
+    fail unknown when content[at] <> u8('\n')
+    at += 1
+    fail unknown when not strings.starts(content[at..<lenof content],
+                                         ended_well)
+    at += lenof ended_well
+    while at < lenof content do
+        fail unknown when lenof content - at < 9
+        letter: u8 = content[at]
+        fail unknown when letter <> u8('o') and letter <> u8('e')
+        mut length: u64 = 0
+        for index in usize(0)..<8 do
+            length = (length << 8) | u64(content[at + 1 + index])
+        end for
+        at += 9
+        fail unknown when length > u64(lenof content - at)
+        stop: usize = at + usize(length)
+        item: piece = (errors: letter == u8('e'), bytes: content[at..<stop])
+        vec.push(found.said, memory, item) else (problem)
+            _ = problem
+            fail unknown
+        end
+        at = stop
+    end while
+    spelled: sha256.spelling = sha256.hex(found.entry)
+    place_of: []u8 = strings.joined(memory, [opened.root, "/entries/",
+                                             spelled[0..<64]]) else (problem)
+        _ = problem
+        fail unknown
+    end
+    there: files.found = files.kind_of(host, place_of) else (problem)
+        _ = problem
+        fail unknown
+    end
+    fail unknown when there <> io.subdirectory
+end known
+
+--  The value of a hexadecimal digit.
+digit: (byte: u8) -> (value: u8) ! unknown =
+    if byte >= u8('0') and byte <= u8('9') then
+        value = byte - u8('0')
+    elsif byte >= u8('a') and byte <= u8('f') then
+        value = byte - u8('a') + 10
+    else
+        fail unknown
+    end if
+end digit
+
+--  Where the store is: `given` when it is not empty, made absolute, or
+--  the user's own.
+place: (host: blocking.host, memory: lifetime.memory, given: []u8)
+       -> (root: []u8) ! report.refused =
+    if lenof given > 0 then
+        if given[0] == u8('/') then
+            root = try glued(host, memory, [given])
+            return
+        end if
+        here: []u8 = files.working(host, memory) else (problem)
+            gave_up(host, "the working directory", problem)
+            fail report.refused
+        end
+        root = try glued(host, memory, [here, "/", given])
+        return
+    end if
+    cache: []u8 = variable(host, "XDG_CACHE_HOME")
+    if lenof cache > 0 and cache[0] == u8('/') then
+        root = try glued(host, memory, [cache, "/landin/store"])
+        return
+    end if
+    home: []u8 = variable(host, "HOME")
+    if lenof home > 0 and home[0] == u8('/') then
+        root = try glued(host, memory, [home, "/.cache/landin/store"])
+        return
+    end if
+    report.say(host, codes.store_nowhere,
+               ["neither XDG_CACHE_HOME nor HOME says where this user's store is; name its directory with `--store PATH`"])
+    fail report.refused
+end place
+
+--  The value of the environment's variable `name`, or nothing.
+variable: (host: blocking.host, name: []u8) -> (value: []u8 from host) =
+    value = ""
+    found: text.host_string =
+        io.variable_named(host, text.host_over(name)) else (problem)
+            _ = problem
+            return
+        end
+    value = text.host_bytes(found)
+end variable
+
+--  What the `version` file at `marker` holds, or nothing when there is
+--  none.
+version: (host: blocking.host, memory: lifetime.memory, marker: []u8)
+         -> (written: []u8) ! report.refused =
+    written = files.read_all(host, memory, marker) else (problem)
+        if problem <> io.not_found then
+            gave_up(host, marker, problem)
+            fail report.refused
+        end if
+        ""
+    end
+end version
+
+--  Take the store's lock.
+locked: (host: blocking.host, memory: lifetime.memory, opened: store)
+        -> (held_by: posix.descriptor) ! report.refused =
+    path: []u8 = try glued(host, memory, [opened.root, "/lock"])
+    held_by = files.lock(path) else (problem)
+        said(host, path, problem)
+        fail report.refused
+    end
+end locked
+
+--  A random name.
+named: (host: blocking.host) -> (name: [16]u8) ! report.refused =
+    name = files.random_name() else (problem)
+        said(host, "the system's random source", problem)
+        fail report.refused
+    end
+end named
+
+text_of: (path: []u8) -> (host_path: text.host_string from path) =
+    host_path = text.host_over(path)
+end text_of
+
+--  Say that `what` could not be dealt with and why.
+gave_up: (host: blocking.host, what: []u8, problem: failure.reason)
+         -> none =
+    report.say(host, codes.host_refused, [what, ": ", failure.words(problem)])
+end gave_up
+
+said: (host: blocking.host, what: []u8, problem: posix.errno) -> none =
+    report.say(host, codes.host_refused, [what, ": ", posix.words(problem)])
+end said
+
+glued: (host: blocking.host, memory: lifetime.memory, parts: [][]u8)
+       -> (whole: []u8) ! report.refused =
+    whole = strings.joined(memory, parts) else (problem)
+        gave_up(host, "a path", problem)
+        fail report.refused
+    end
+end glued
+
+kind: (host: blocking.host, path: []u8) -> (what: files.found)
+      ! report.refused =
+    what = files.kind_of(host, path) else (problem)
+        gave_up(host, path, problem)
+        fail report.refused
+    end
+end kind
+
+made: (host: blocking.host, path: []u8) -> none ! report.refused =
+    files.make_all(host, path) else (problem)
+        gave_up(host, path, problem)
+        fail report.refused
+    end
+end made

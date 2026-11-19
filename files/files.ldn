@@ -204,3 +204,128 @@ public program: (host: blocking.host, memory: lifetime.memory, name: []u8)
         rest = rest[cut + 1..<lenof rest]
     end loop
 end program
+
+--- The paths of what the directory `path` holds, each `path`, a `/` and a
+--- name, in the system's order.  They live as long as `memory`.
+public held: (host: blocking.host, memory: lifetime.memory, path: []u8)
+             -> (names: vec.list([]u8))
+             ! io.not_found | io.no_access | io.io_failed
+             | mem.out_of_memory =
+    names = vec.new(item: []u8)
+    mut buffer: [io.directory_buffer]u8 = zeroed
+    mut listing: io.directory =
+        try io.open_directory(host, text.host_over(path), buffer)
+    loop do
+        item: io.entry = io.read_entry(host, listing) else (problem)
+            io.close_directory(host, listing) else none
+            fail problem
+        end
+        name: []u8 = text.host_bytes(item.name)
+        break when lenof name == 0
+        below: []u8 = strings.joined(memory, [path, "/", name])
+            else (problem)
+            io.close_directory(host, listing) else none
+            fail problem
+        end
+        vec.push(names, memory, below) else (problem)
+            io.close_directory(host, listing) else none
+            fail problem
+        end
+    end loop
+    try io.close_directory(host, listing)
+end held
+
+--- Take the write permission from everything under the directory `path`:
+--- each file keeps what it had of reading and executing, and each
+--- directory may be read and entered and no more.  `path` itself is left
+--- as it is unless `top` is true, so that it can still be renamed.  A
+--- link is left alone.  The paths are made in `memory`.
+public seal: (host: blocking.host, memory: lifetime.memory, path: []u8,
+              top: bool) -> none ! posix.errno =
+    status: posix.status = try posix.status_at(posix.working_directory,
+                                               text.host_over(path), false)
+    if status.kind == posix.directory then
+        names: vec.list([]u8) = held(host, memory, path) else (problem)
+            _ = problem
+            fail posix.eio
+        end
+        for below in vec.used(names) do
+            try seal(host, memory, below, true)
+        end for
+        if top then
+            try posix.change_mode_at(posix.working_directory,
+                                     text.host_over(path), 0o555)
+        end if
+    elsif status.kind == posix.regular then
+        try posix.change_mode_at(posix.working_directory,
+                                 text.host_over(path),
+                                 status.permissions & 0o555)
+    end if
+end seal
+
+--- Give `old` the name `new` in one step.  A directory of that name that
+--- holds something is in the way, `posix.enotempty`.
+public rename: (old: []u8, new: []u8) -> none ! posix.errno =
+    posix.rename_at(posix.working_directory, text.host_over(old),
+                    posix.working_directory, text.host_over(new))
+        else (problem)
+        fail posix.enotempty when problem == posix.eexist
+        fail problem
+    end
+end rename
+
+--- Take the exclusive lock of the file at `path`, made when it is missing,
+--- waiting for whoever holds it.  Give what this returns to `unlock`.
+public lock: (path: []u8) -> (held_by: posix.descriptor) ! posix.errno =
+    options: posix.open_options = (access: posix.read_write, create: true,
+                                   exclusive: false, truncate: false,
+                                   append: false, directory: false)
+    held_by = try posix.open_at(posix.working_directory,
+                                text.host_over(path), options, 0o644)
+    loop do
+        posix.lock(held_by, posix.exclusive_lock, true) else (problem)
+            continue when problem == posix.eintr
+            posix.close(held_by) else none
+            fail problem
+        end
+        break
+    end loop
+end lock
+
+--- Give up the lock `lock` took.
+public unlock: (held_by: posix.descriptor) -> none =
+    posix.unlock(held_by) else none
+    posix.close(held_by) else none
+end unlock
+
+--- Write `parts`, one after another, as the whole content of the file at
+--- `path`, which is made, or emptied first when it is there.
+public write_all: (host: blocking.host, path: []u8, parts: [][]u8)
+                  -> none
+                  ! io.not_found | io.no_access | io.is_a_directory
+                  | io.io_failed =
+    opened: io.file = try io.open_write(host, text.host_over(path))
+    for part in parts do
+        io.write(host, opened, part) else (problem)
+            io.close(host, opened) else none
+            fail problem
+        end
+    end for
+    try io.close(host, opened)
+end write_all
+
+--- Sixteen hexadecimal digits from the system's random source, for a name
+--- nothing else has.
+public random_name: () -> (name: [16]u8) ! posix.errno =
+    mut raw: [8]u8 = zeroed
+    mut got: usize = 0
+    while got < 8 do
+        got += try posix.random_bytes(raw[got..<8])
+    end while
+    digits: []u8 = "0123456789abcdef"
+    name = zeroed
+    for at in usize(0)..<8 do
+        name[2 * at] = digits[usize(raw[at] >> 4)]
+        name[2 * at + 1] = digits[usize(raw[at] & 15)]
+    end for
+end random_name
