@@ -4,8 +4,8 @@
 -- `refine NAME`, and the only one of this package's programs that reaches
 -- a network.
 --
---     refine-fetch [--store PATH] [--check]
---     refine-fetch [--store PATH] --update [NAME...]
+--     refine-fetch [--store PATH] [--vendor] [--check]
+--     refine-fetch [--store PATH] [--vendor] --update [NAME...]
 --     refine-fetch explain [CODE]
 --     refine-fetch --describe
 --     refine-fetch --complete -- WORD...
@@ -15,7 +15,9 @@
 -- what the store lacks, and writes the lock when it changed.  `--update`
 -- chooses the versions of the named packages anew, or of all.  `--check`
 -- says whether the lock and the store give what the description asks for,
--- and fetches nothing.
+-- and fetches nothing.  `--vendor` then puts a copy of every package the
+-- lock names under `vendor/` in the package's directory (see
+-- `vendoring`).
 --
 -- `--repeat N` is for the tool's own tests and is not in the help: it
 -- does the whole fetch N times in this one process.
@@ -39,8 +41,8 @@ import dev701/refine_build/text/strings
 package_file: []u8 = "landin.package"
 lock_file: []u8 = "landin.lock"
 
-usage: []u8 = """usage: refine-fetch [--store PATH] [--check]
-           refine-fetch [--store PATH] --update [NAME...]
+usage: []u8 = """usage: refine-fetch [--store PATH] [--vendor] [--check]
+           refine-fetch [--store PATH] [--vendor] --update [NAME...]
            refine-fetch explain [CODE]
 
     Run in a package's directory: makes landin.lock say which commit and
@@ -53,6 +55,9 @@ usage: []u8 = """usage: refine-fetch [--store PATH] [--check]
                            the lock spells them, anew; of all with no name
       --check              say whether the lock and the store give what
                            the description asks for, and fetch nothing
+      --vendor             after that, copy every package the lock names
+                           into vendor/ here, so a build needs neither
+                           the store's copies nor a network
       --store PATH         the store; without it,
                            $XDG_CACHE_HOME/landin/store, or else
                            $HOME/.cache/landin/store
@@ -76,6 +81,7 @@ options: type = struct
     store: []u8
     update: bool
     check_only: bool
+    vendor: bool
     help: bool
     repeat: usize
     wanted: vec.list([]u8)
@@ -137,7 +143,8 @@ once: (escaping host: blocking.host, parent: lifetime.parent,
                               lock_file: lock_file, store: asked.store,
                               update: asked.update,
                               names: vec.used(asked.wanted),
-                              check_only: asked.check_only)
+                              check_only: asked.check_only,
+                              vendor: asked.vendor)
     try fetch.run(host, memory, parent, request)
 end once
 
@@ -145,7 +152,7 @@ end once
 arguments: (host: blocking.host, memory: lifetime.memory)
            -> (asked: options) ! report.refused | command.wrong_usage =
     asked = (mode: fetching, store: "", update: false, check_only: false,
-             help: false, repeat: 1, wanted: vec.new(item: []u8))
+             vendor: false, help: false, repeat: 1, wanted: vec.new(item: []u8))
     count: usize = io.argument_count(host)
     mut at: usize = 0
     while at < count do
@@ -168,6 +175,8 @@ arguments: (host: blocking.host, memory: lifetime.memory)
             asked.check_only = true
         elsif strings.same(word, "--update") then
             asked.update = true
+        elsif strings.same(word, "--vendor") then
+            asked.vendor = true
         elsif strings.same(word, "--store") then
             asked.store = try command.value(host, memory, at, count, word,
                                             "PATH")
@@ -205,6 +214,11 @@ arguments: (host: blocking.host, memory: lifetime.memory)
                    ["`--check` fetches nothing and `--update` chooses anew; give one of them"])
         fail command.wrong_usage
     end if
+    if asked.check_only and asked.vendor then
+        report.say(host, codes.command_line,
+                   ["`--check` writes nothing and `--vendor` writes the copies; give one of them"])
+        fail command.wrong_usage
+    end if
 end arguments
 
 --  `--complete -- WORD...`: an option, a code after `explain`, or after
@@ -230,6 +244,7 @@ completed: (host: blocking.host, memory: lifetime.memory, given: [][]u8)
         command.offered(host, typed, "--help")
         command.offered(host, typed, "--store")
         command.offered(host, typed, "--update")
+        command.offered(host, typed, "--vendor")
         return
     end if
     if lenof words == 1 then command.offered(host, typed, "explain") end if

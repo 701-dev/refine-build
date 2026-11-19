@@ -29,8 +29,32 @@ import dev701/refine_build/report
 import dev701/refine_build/store
 import dev701/refine_build/text/strings
 
---- What is in a package's root on this machine and is no part of it.
-public left_out: [5][]u8 = [".landin", ".git", ".hg", ".svn", ".jj"]
+--- What is in a package's root on this machine and is no part of it:
+--- what the tools write, what version control keeps, and the copies of
+--- other packages under `vendor`, each of which is hashed as itself.
+public left_out: [6][]u8 = [".landin", ".git", ".hg", ".svn", ".jj",
+                            "vendor"]
+
+--- The directory of a project that holds copies of its packages.
+public vendor_directory: []u8 = "vendor"
+
+--- The directory under it that holds each tool's packages, the tool
+--- among them, under the tool's OWNER/NAME.  No owner is spelled so.
+public tools_shelf: []u8 = "for-tools"
+
+--- The directory that holds the vendored packages of the program `root`
+--- names, the one being built in `project` when it is empty and else a
+--- tool: each package is under its OWNER/NAME there.
+public shelf: (host: blocking.host, memory: lifetime.memory, project: []u8,
+               root: []u8) -> (path: []u8) ! report.refused =
+    if lenof root == 0 then
+        path = try glued(host, memory, [project, "/", vendor_directory])
+    else
+        path = try glued(host, memory,
+                         [project, "/", vendor_directory, "/", tools_shelf,
+                          "/", root])
+    end if
+end shelf
 
 --- The name of a description's file in a package's root.
 public package_file: []u8 = "landin.package"
@@ -89,7 +113,8 @@ public locked: (host: blocking.host, memory: lifetime.memory,
                 about: description.description, locks: lock.lock)
                -> (found: set) ! report.refused =
     found = try rooted(host, memory, parent, kept_in, lock_file, locks, "",
-                       project, true, package_file, vec.used(about.needs))
+                       try shelf(host, memory, project, ""), project, true,
+                       package_file, vec.used(about.needs))
 end locked
 
 --- The tool that `want`, a `uses` line of the package in `project`, asks
@@ -107,7 +132,7 @@ public tool_locked: (host: blocking.host, memory: lifetime.memory,
             path = try glued(host, memory, [project, "/", want.place])
         end if
         sum: sha256.digest = try tree.of_tree(host, parent, path,
-                                              left_out[0..<5])
+                                              left_out[0..<6])
         spelled: sha256.spelling = sha256.hex(sum)
         hash = try glued(host, memory, [spelled[0..<64]])
     else
@@ -122,7 +147,8 @@ public tool_locked: (host: blocking.host, memory: lifetime.memory,
         lines: []lock.line = vec.used(locks.lines)
         line: lock.line = lines[line_at]
         try served(host, lock_file, package_file, want, line)
-        path = try held_at(host, memory, kept_in, lock_file, line)
+        path = try held_at(host, memory, parent, kept_in, lock_file,
+                           try shelf(host, memory, project, line.name), line)
         hash = try glued(host, memory, [line.tree])
     end if
     about: description.description = try described(host, memory, path)
@@ -136,8 +162,8 @@ public tool_locked: (host: blocking.host, memory: lifetime.memory,
         try called(host, lock_file, lines[again_at], name)
     end if
     beside: set = try rooted(host, memory, parent, kept_in, lock_file, locks,
-                             name, path, want.local, name,
-                             vec.used(about.needs))
+                             name, try shelf(host, memory, project, name),
+                             path, want.local, name, vec.used(about.needs))
     mut itself: package = (name: name, path: path, tree: hash,
                            local: want.local, about: about,
                            needs: vec.new(item: usize))
@@ -160,10 +186,11 @@ end tool_locked
 --  being built when it is empty and else a tool.  `base` is the
 --  directory of the package that has the wants, `may_local` whether it
 --  may name local paths, and `asker` what it is called in what is said.
+--  `shelved` is the directory its vendored packages are in, if any are.
 rooted: (host: blocking.host, memory: lifetime.memory,
          parent: lifetime.parent, kept_in: store.store, lock_file: []u8,
-         locks: lock.lock, root: []u8, base: []u8, may_local: bool,
-         asker: []u8, wants: []description.requirement)
+         locks: lock.lock, root: []u8, shelved: []u8, base: []u8,
+         may_local: bool, asker: []u8, wants: []description.requirement)
         -> (found: set) ! report.refused =
     found = none_needed()
     --  First every package a local path names, from the asking package
@@ -190,8 +217,8 @@ rooted: (host: blocking.host, memory: lifetime.memory,
     --  they are first asked for.
     for want in wants do
         index: usize = try wanted(host, memory, parent, kept_in, lock_file,
-                                  locks, root, found, base, may_local, asker,
-                                  want)
+                                  locks, root, shelved, found, base,
+                                  may_local, asker, want)
         try noted(host, memory, found.needs, index)
     end for
     at = 0
@@ -200,8 +227,9 @@ rooted: (host: blocking.host, memory: lifetime.memory,
         mut needs := vec.new(item: usize)
         for want in vec.used(item.needs) do
             index: usize = try wanted(host, memory, parent, kept_in,
-                                      lock_file, locks, root, found,
-                                      item.path, item.local, item.name, want)
+                                      lock_file, locks, root, shelved,
+                                      found, item.path, item.local,
+                                      item.name, want)
             try noted(host, memory, needs, index)
         end for
         slot: ptr mut package = vec.at(found.all, at) else (problem)
@@ -235,11 +263,33 @@ served: (host: blocking.host, lock_file: []u8, asker: []u8,
     fail report.refused
 end served
 
---  The directory that holds what the lock's `line` names: its entry in
---  the store.
+--  The directory that holds what the lock's `line` names: its copy
+--  under `shelved`, the vendored packages, when one is there, which has
+--  to hash to the line's tree, and else its entry in the store.
 held_at: (host: blocking.host, memory: lifetime.memory,
-          kept_in: store.store, lock_file: []u8, line: lock.line)
+          parent: lifetime.parent, kept_in: store.store, lock_file: []u8,
+          shelved: []u8, line: lock.line)
          -> (path: []u8) ! report.refused =
+    copy: []u8 = try glued(host, memory, [shelved, "/", line.name])
+    vendored: files.found = files.kind_of(host, copy) else (problem)
+        gave_up(host, copy, problem)
+        fail report.refused
+    end
+    if vendored == io.subdirectory then
+        sum: sha256.digest = try tree.of_tree(host, parent, copy,
+                                              left_out[0..<0])
+        spelled: sha256.spelling = sha256.hex(sum)
+        if not strings.same(spelled[0..<64], line.tree) then
+            report.at_line(host, codes.vendor_differs, lock_file, 0,
+                           ["the copy of `", line.name, "` at `", copy,
+                            "` hashes to ", spelled[0..<64],
+                            ", and the lock says ", line.tree,
+                            "; run `refine-fetch --vendor` to write the copy anew, or move it out of `vendor` and name it as a local path in a `needs` line to build with it as it is"])
+            fail report.refused
+        end if
+        path = copy
+        return
+    end if
     path = try glued(host, memory, [kept_in.root, "/entries/", line.tree])
     held: files.found = files.kind_of(host, path) else (problem)
         gave_up(host, path, problem)
@@ -249,7 +299,7 @@ held_at: (host: blocking.host, memory: lifetime.memory,
         report.at_line(host, codes.entry_missing, lock_file, 0,
                        ["the store at `", kept_in.root, "` does not hold `",
                         line.name,
-                        "` as the lock names it; run `refine-fetch` in the package's directory"])
+                        "` as the lock names it, and no copy of it is under `vendor`; run `refine-fetch` in the package's directory"])
         fail report.refused
     end if
 end held_at
@@ -270,8 +320,9 @@ end called
 --  `may_local` whether it may name a local path.
 wanted: (host: blocking.host, memory: lifetime.memory,
          parent: lifetime.parent, kept_in: store.store, lock_file: []u8,
-         locks: lock.lock, root: []u8, inout found: set, base: []u8,
-         may_local: bool, asker: []u8, want: description.requirement)
+         locks: lock.lock, root: []u8, shelved: []u8, inout found: set,
+         base: []u8, may_local: bool, asker: []u8,
+         want: description.requirement)
         -> (index: usize) ! report.refused =
     if want.local then
         if not may_local then
@@ -309,8 +360,8 @@ wanted: (host: blocking.host, memory: lifetime.memory,
                             "` asks for, and the lock has no line for it and no local path gives it; run `refine-fetch` in the package's directory"])
             fail report.refused
         end
-        index = try line_loaded(host, memory, kept_in, lock_file, locks,
-                                found, line_at)
+        index = try line_loaded(host, memory, parent, kept_in, lock_file,
+                                locks, shelved, found, line_at)
         return
     end if
     line_at: usize = lock.placed(locks, root, want.place) else (problem)
@@ -322,14 +373,15 @@ wanted: (host: blocking.host, memory: lifetime.memory,
     end
     lines: []lock.line = vec.used(locks.lines)
     try served(host, lock_file, asker, want, lines[line_at])
-    index = try line_loaded(host, memory, kept_in, lock_file, locks, found,
-                            line_at)
+    index = try line_loaded(host, memory, parent, kept_in, lock_file, locks,
+                            shelved, found, line_at)
 end wanted
 
 --  The index of the package the lock's line at `line_at` names, read from
 --  the store when the set does not have it.
 line_loaded: (host: blocking.host, memory: lifetime.memory,
-              kept_in: store.store, lock_file: []u8, locks: lock.lock,
+              parent: lifetime.parent, kept_in: store.store,
+              lock_file: []u8, locks: lock.lock, shelved: []u8,
               inout found: set, line_at: usize)
              -> (index: usize) ! report.refused =
     lines: []lock.line = vec.used(locks.lines)
@@ -344,7 +396,8 @@ line_loaded: (host: blocking.host, memory: lifetime.memory,
         index = at_name
         return
     end if
-    path: []u8 = try held_at(host, memory, kept_in, lock_file, line)
+    path: []u8 = try held_at(host, memory, parent, kept_in, lock_file,
+                             shelved, line)
     about: description.description = try described(host, memory, path)
     name: []u8 = try glued(host, memory, [about.owner, "/", about.name])
     try called(host, lock_file, line, name)
@@ -381,7 +434,7 @@ local_at: (host: blocking.host, memory: lifetime.memory,
         index = at_name
         return
     end if
-    sum: sha256.digest = try tree.of_tree(host, parent, path, left_out[0..<5])
+    sum: sha256.digest = try tree.of_tree(host, parent, path, left_out[0..<6])
     spelled: sha256.spelling = sha256.hex(sum)
     index = vec.length(found.all)
     here: package = (name: name, path: path,

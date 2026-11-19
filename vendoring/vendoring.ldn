@@ -1,0 +1,417 @@
+-- Vendoring: a copy of every package the lock names, as plain files in
+-- the project, so that a build needs neither the store's entries nor a
+-- network.  `refine-fetch --vendor` writes the copies; `refine-build`
+-- takes a package from its copy when one is there and hashes to what the
+-- lock says (see `packages`).
+--
+--     vendor/OWNER/NAME/...                        a package of the program
+--     vendor/for-tools/TOOL/OWNER/NAME/...         a package of the tool
+--                                                  TOOL, an OWNER/NAME, the
+--                                                  tool itself among them
+--     vendor/landin.vendor                         what was written
+--
+-- A tool's packages are apart from the program's, as they are in the lock,
+-- since each may hold another version of one name.  No owner is spelled
+-- `for-tools`, so the two do not meet.  A package from a local path is
+-- not copied: it is the copy that is there.
+--
+-- `landin.vendor` lists what this wrote, a line for each copy in the
+-- order of their paths:
+--
+--     vendor 1
+--     holds OWNER/NAME HEX64
+--     holds for-tools/TOOL/OWNER/NAME HEX64
+--
+-- Only what the list names is ever overwritten or removed.  A copy that
+-- hashes to what the lock says is left as it is; one that does not, or is
+-- missing, is written anew from the store; one the lock no longer names
+-- is removed.  Something else where a copy goes is refused, and anything
+-- else under `vendor` is left alone and said.
+
+import core/cmp
+import core/failure
+import core/io
+import core/sort
+import core/text
+import core/vec
+import hosted/blocking
+import platform/posix
+import dev701/refine_build/codes
+import dev701/refine_build/files
+import dev701/refine_build/hash/sha256
+import dev701/refine_build/hash/tree
+import dev701/refine_build/lifetime
+import dev701/refine_build/lock
+import dev701/refine_build/packages
+import dev701/refine_build/report
+import dev701/refine_build/store
+import dev701/refine_build/text/lines
+import dev701/refine_build/text/strings
+
+--- The name of the list of what was written, in `vendor`.
+public list_file: []u8 = "landin.vendor"
+
+--  One copy: its path under `vendor`, and the tree hash it was written
+--  with.
+copy: type = struct
+    path: []u8
+    tree: []u8
+end copy
+
+--- Make `vendor` in `project` hold a copy of every package `locks` names,
+--- from the store `kept_in`, which holds them all, and nothing else that
+--- this wrote before.  What is done is said on standard output.
+public written: (host: blocking.host, memory: lifetime.memory,
+                 parent: lifetime.parent, kept_in: store.store,
+                 project: []u8, locks: lock.lock)
+                -> none ! report.refused =
+    base: []u8 = try glued(host, memory,
+                           [project, "/", packages.vendor_directory])
+    list_path: []u8 = try glued(host, memory, [base, "/", list_file])
+    had: vec.list(copy) = try list_read(host, memory, list_path)
+    mut now := vec.new(item: copy)
+    mut fresh: usize = 0
+    for line in vec.used(locks.lines) do
+        group: []u8 = if line.tool then line.name else line.root end if
+        mut below: []u8 = try glued(host, memory, [line.name])
+        if lenof group > 0 then
+            below = try glued(host, memory,
+                              [packages.tools_shelf, "/", group, "/",
+                               line.name])
+        end if
+        target: []u8 = try glued(host, memory, [base, "/", below])
+        shown: []u8 = try glued(host, memory,
+                                [packages.vendor_directory, "/", below])
+        kind: files.found = files.kind_of(host, target) else (problem)
+            gave_up(host, target, problem)
+            fail report.refused
+        end
+        mut write: bool = true
+        if kind <> files.absent then
+            if not listed(vec.used(had), below) then
+                report.say(host, codes.vendor_foreign,
+                           ["`", shown, "` is where the copy of `", line.name,
+                            "` goes, and ", packages.vendor_directory, "/",
+                            list_file,
+                            " does not say refine-fetch wrote what is there; move it away, or remove it, and run `refine-fetch --vendor` again"])
+                fail report.refused
+            end if
+            if kind == io.subdirectory then
+                sum: sha256.digest =
+                    try tree.of_tree(host, parent, target,
+                                     packages.left_out[0..<0])
+                spelled: sha256.spelling = sha256.hex(sum)
+                if strings.same(spelled[0..<64], line.tree) then
+                    write = false
+                end if
+            end if
+            if write then
+                files.remove_all(host, memory, target) else (problem)
+                    gave_up(host, target, problem)
+                    fail report.refused
+                end
+            end if
+        end if
+        if write then
+            entry: []u8 = try glued(host, memory,
+                                    [kept_in.root, "/entries/", line.tree])
+            try copied(host, memory, entry, target)
+            version: []u8 = if lenof line.version > 0 then line.version
+                            else line.commit end if
+            said(host, ["vendored ", line.name, " ", version, " to ", shown,
+                        "\n"])
+            inc fresh
+        end if
+        kept: copy = (path: below, tree: try glued(host, memory, [line.tree]))
+        vec.push(now, memory, kept) else (problem)
+            gave_up(host, target, problem)
+            fail report.refused
+        end
+    end for
+    --  What was written before and the lock names no longer.
+    mut gone: usize = 0
+    for old in vec.used(had) do
+        continue when listed(vec.used(now), old.path)
+        target: []u8 = try glued(host, memory, [base, "/", old.path])
+        files.remove_all(host, memory, target) else (problem)
+            gave_up(host, target, problem)
+            fail report.refused
+        end
+        try emptied(host, memory, base, old.path)
+        said(host, ["removed ", packages.vendor_directory, "/", old.path,
+                    "\n"])
+        inc gone
+    end for
+    try strangers(host, memory, base, vec.used(now))
+    if vec.length(now) == 0 then
+        files.remove_all(host, memory, list_path) else (problem)
+            gave_up(host, list_path, problem)
+            fail report.refused
+        end
+        io.remove_directory(host, text.host_over(base)) else none
+    else
+        try list_written(host, memory, list_path, now)
+    end if
+    said(host, [packages.vendor_directory, " holds ",
+                try number(host, memory, u64(vec.length(now))),
+                " packages: ", try number(host, memory, u64(fresh)),
+                " written, ", try number(host, memory, u64(gone)),
+                " removed\n"])
+end written
+
+--  Whether `path` is one of `copies`.
+listed: (copies: []copy, path: []u8) -> (yes: bool) =
+    yes = false
+    for other in copies do
+        if strings.same(other.path, path) then yes = true end if
+    end for
+end listed
+
+--  Read the list at `path`; none there is an empty list.
+list_read: (host: blocking.host, memory: lifetime.memory, path: []u8)
+           -> (had: vec.list(copy)) ! report.refused =
+    had = vec.new(item: copy)
+    source: []u8 = files.read_all(host, memory, path) else (problem)
+        return when problem == io.not_found
+        report.at_line(host, codes.file_unread, path, 0,
+                       [failure.words(problem)])
+        fail report.refused
+    end
+    doc: lines.document = lines.read(memory, source) else (problem)
+        gave_up(host, path, problem)
+        fail report.refused
+    end
+    for item, at in vec.used(doc.lines) do
+        words: [][]u8 = vec.used(item.words)
+        mut right: bool = item.state == lines.sound
+        if right and at == 0 then
+            right = lenof words == 2 and strings.same(words[0], "vendor")
+                    and strings.same(words[1], "1")
+        elsif right then
+            right = lenof words == 3 and strings.same(words[0], "holds")
+                    and lenof words[2] == 64
+        end if
+        if not right then
+            report.at_line(host, codes.line_shape, path, item.number,
+                           ["the list of vendored copies starts with `vendor 1` and then has `holds PATH HEX64` lines; `refine-fetch --vendor` writes it, so do not write it by hand. Remove it and the copies it lists, and run that again"])
+            fail report.refused
+        end if
+        continue when at == 0
+        one: copy = (path: words[1], tree: words[2])
+        vec.push(had, memory, one) else (problem)
+            gave_up(host, path, problem)
+            fail report.refused
+        end
+    end for
+end list_read
+
+--  Write the list at `path`, its lines in the order of their paths.
+list_written: (host: blocking.host, memory: lifetime.memory, path: []u8,
+               inout now: vec.list(copy)) -> none ! report.refused =
+    order: usize = 0
+    sort.sort_by(vec.used(now), order, earlier)
+    mut whole: []u8 = "vendor 1\n"
+    for item in vec.used(now) do
+        whole = try glued(host, memory,
+                          [whole, "holds ", item.path, " ", item.tree, "\n"])
+    end for
+    --  Leave a list that is right as it is.
+    mut same: bool = true
+    was: []u8 = files.read_all(host, memory, path) else (problem)
+        _ = problem
+        same = false
+        ""
+    end
+    return when same and strings.same(was, whole)
+    files.write_all(host, path, [whole]) else (problem)
+        gave_up(host, path, problem)
+        fail report.refused
+    end
+end list_written
+
+earlier: (by: usize, left: copy, right: copy) -> (yes: bool) =
+    _ = by
+    yes = cmp.compare(left.path, right.path) == cmp.less
+end earlier
+
+--  Copy what is at `origin`, a file, a link or a directory with all it
+--  holds, to `to`, which is not there.  A file keeps whether it may be
+--  executed and may be written by its owner; a link keeps its target.
+copied: (host: blocking.host, memory: lifetime.memory, origin: []u8, to: []u8)
+        -> none ! report.refused =
+    status: posix.status = posix.status_at(posix.working_directory,
+                                           text.host_over(origin), false)
+        else (problem)
+        report.at_line(host, codes.file_unread, origin, 0,
+                       [posix.words(problem)])
+        fail report.refused
+    end
+    if status.kind == posix.directory then
+        files.make_all(host, to) else (problem)
+            gave_up(host, to, problem)
+            fail report.refused
+        end
+        names: vec.list([]u8) = files.held(host, memory, origin) else (problem)
+            gave_up(host, origin, problem)
+            fail report.refused
+        end
+        for below in vec.used(names) do
+            mut cut: usize = lenof below
+            while cut > 0 and below[cut - 1] <> u8('/') do dec cut end while
+            try copied(host, memory, below,
+                       try glued(host, memory,
+                                 [to, "/", below[cut..<lenof below]]))
+        end for
+    elsif status.kind == posix.symbolic_link then
+        mut room: [4097]u8 = zeroed
+        target: text.host_string =
+            posix.read_link_at(posix.working_directory, text.host_over(origin),
+                               room) else (problem)
+                report.at_line(host, codes.file_unread, origin, 0,
+                               [posix.words(problem)])
+                fail report.refused
+            end
+        posix.symbolic_link_at(target, posix.working_directory,
+                               text.host_over(to)) else (problem)
+            report.say(host, codes.host_refused, [to, ": ", posix.words(problem)])
+            fail report.refused
+        end
+    elsif status.kind == posix.regular then
+        try file_copied(host, origin, to)
+        posix.change_mode_at(posix.working_directory, text.host_over(to),
+                             (status.permissions & 0o755) | 0o644)
+            else (problem)
+            report.say(host, codes.host_refused, [to, ": ", posix.words(problem)])
+            fail report.refused
+        end
+    else
+        report.at_line(host, codes.tree_unhashable, origin, 0,
+                       ["neither a file, a directory nor a link, so it is not copied"])
+        fail report.refused
+    end if
+end copied
+
+--  Copy the file at `origin` to `to`, a block at a time.
+file_copied: (host: blocking.host, origin: []u8, to: []u8)
+             -> none ! report.refused =
+    source: io.file = io.open_read(host, text.host_over(origin)) else (problem)
+        gave_up(host, origin, problem)
+        fail report.refused
+    end
+    defer io.close(host, source) else none
+    target: io.file = io.open_write(host, text.host_over(to)) else (problem)
+        gave_up(host, to, problem)
+        fail report.refused
+    end
+    mut room: [16384]u8 = zeroed
+    loop do
+        got: usize = io.read(host, source, room[0..<16384]) else (problem)
+            io.close(host, target) else none
+            gave_up(host, origin, problem)
+            fail report.refused
+        end
+        break when got == 0
+        io.write(host, target, room[0..<got]) else (problem)
+            io.close(host, target) else none
+            gave_up(host, to, problem)
+            fail report.refused
+        end
+    end loop
+    io.close(host, target) else (problem)
+        gave_up(host, to, problem)
+        fail report.refused
+    end
+end file_copied
+
+--  Remove the directories above `below`, a path under `base`, that hold
+--  nothing any more, from the nearest up.
+emptied: (host: blocking.host, memory: lifetime.memory, base: []u8,
+          below: []u8) -> none ! report.refused =
+    mut cut: usize = lenof below
+    loop do
+        while cut > 0 and below[cut - 1] <> u8('/') do dec cut end while
+        break when cut == 0
+        dec cut
+        above: []u8 = try glued(host, memory, [base, "/", below[0..<cut]])
+        io.remove_directory(host, text.host_over(above)) else (problem)
+            _ = problem
+            break
+        end
+    end loop
+end emptied
+
+--  Say what is under `base` and is none of `now`, nor on the way to one.
+strangers: (host: blocking.host, memory: lifetime.memory, base: []u8,
+            now: []copy) -> none ! report.refused =
+    there: files.found = files.kind_of(host, base) else (problem)
+        gave_up(host, base, problem)
+        fail report.refused
+    end
+    return when there <> io.subdirectory
+    try looked(host, memory, base, "", now)
+end strangers
+
+--  Look at what the directory `below` of `base` holds, the whole of
+--  `base` when `below` is empty.
+looked: (host: blocking.host, memory: lifetime.memory, base: []u8,
+         below: []u8, now: []copy) -> none ! report.refused =
+    mut path: []u8 = base
+    if lenof below > 0 then
+        path = try glued(host, memory, [base, "/", below])
+    end if
+    names: vec.list([]u8) = files.held(host, memory, path) else (problem)
+        gave_up(host, path, problem)
+        fail report.refused
+    end
+    for whole in vec.used(names) do
+        inner: []u8 = whole[lenof base + 1..<lenof whole]
+        continue when strings.same(inner, list_file)
+        continue when listed(now, inner)
+        mut leads: bool = false
+        for other in now do
+            if lenof other.path > lenof inner
+              and strings.starts(other.path, inner)
+              and other.path[lenof inner] == u8('/') then
+                leads = true
+            end if
+        end for
+        if leads then
+            try looked(host, memory, base, inner, now)
+            continue
+        end if
+        io.write(host, io.err(host), "note: `") else none
+        io.write(host, io.err(host), packages.vendor_directory) else none
+        io.write(host, io.err(host), "/") else none
+        io.write(host, io.err(host), inner) else none
+        io.write(host, io.err(host),
+                 "` is not a copy refine-fetch wrote, and is left as it is; a build does not use it\n")
+            else none
+    end for
+end looked
+
+--  `value` in decimal digits, living as long as `memory`.
+number: (host: blocking.host, memory: lifetime.memory, value: u64)
+        -> (digits: []u8) ! report.refused =
+    mut room: [24]u8 = zeroed
+    mut written_in := text.over(room)
+    text.append_u64(written_in, value) else none
+    digits = try glued(host, memory, [text.used(written_in)])
+end number
+
+--  Say `parts` on standard output.
+said: (host: blocking.host, parts: [][]u8) -> none =
+    for part in parts do io.write(host, io.out(host), part) else none end for
+end said
+
+gave_up: (host: blocking.host, what: []u8, problem: failure.reason)
+         -> none =
+    report.say(host, codes.host_refused, [what, ": ", failure.words(problem)])
+end gave_up
+
+glued: (host: blocking.host, memory: lifetime.memory, parts: [][]u8)
+       -> (whole: []u8) ! report.refused =
+    whole = strings.joined(memory, parts) else (problem)
+        gave_up(host, "a path", problem)
+        fail report.refused
+    end
+end glued

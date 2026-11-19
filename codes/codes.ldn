@@ -42,6 +42,7 @@ public entry_missing: atom
 public package_wrong: atom
 public import_undeclared: atom
 public tool_wrong: atom
+public vendor_differs: atom
 public git_missing: atom
 public git_failed: atom
 public version_untagged: atom
@@ -53,6 +54,7 @@ public versions_clash: atom
 public locations_clash: atom
 public pins_clash: atom
 public name_unlocked: atom
+public vendor_foreign: atom
 
 --- One kind of thing the tool refuses.
 public code: type =
@@ -68,6 +70,7 @@ public code: type =
     package_wrong |
     import_undeclared |
     tool_wrong |
+    vendor_differs |
     git_missing |
     git_failed |
     version_untagged |
@@ -78,13 +81,14 @@ public code: type =
     versions_clash |
     locations_clash |
     pins_clash |
-    name_unlocked
+    name_unlocked |
+    vendor_foreign
 
 --- No code is spelled that way.
 public unknown: atom
 
 --- Every code, in the order `refine-build explain` lists them.
-all: [39]code = [command_line, file_unread, host_refused, no_refine,
+all: [41]code = [command_line, file_unread, host_refused, no_refine,
                  line_unreadable, keyword_unknown, line_shape, said_twice,
                  package_name, line_missing, rule_runs_nothing,
                  placeholder, name_unknown, steps_circle, input_unknown,
@@ -96,6 +100,7 @@ all: [39]code = [command_line, file_unread, host_refused, no_refine,
                  package_wrong,
                  import_undeclared,
                  tool_wrong,
+                 vendor_differs,
                  git_missing,
                  git_failed,
                  version_untagged,
@@ -106,7 +111,8 @@ all: [39]code = [command_line, file_unread, host_refused, no_refine,
                  versions_clash,
                  locations_clash,
                  pins_clash,
-                 name_unlocked]
+                 name_unlocked,
+                 vendor_foreign]
 
 --- How many codes there are.
 public count: () -> (number: usize) =
@@ -160,6 +166,7 @@ public spelled: (which: code) -> (spelling: []u8) =
         package_wrong: spelling = "RB0206"
         import_undeclared: spelling = "RB0207"
         tool_wrong: spelling = "RB0208"
+        vendor_differs: spelling = "RB0209"
         git_missing: spelling = "RF0001"
         git_failed: spelling = "RF0002"
         version_untagged: spelling = "RF0101"
@@ -171,6 +178,7 @@ public spelled: (which: code) -> (spelling: []u8) =
         locations_clash: spelling = "RF0202"
         pins_clash: spelling = "RF0203"
         name_unlocked: spelling = "RF0204"
+        vendor_foreign: spelling = "RF0301"
     end match
 end spelled
 
@@ -369,6 +377,14 @@ public about: (which: code) -> (words: []u8) =
             `kind program` whose programs the tool compiles and the recipe's
             `run` lines name by their first word.
             """
+        vendor_differs: words = """
+            A package under `vendor/` is not what the lock names: its files
+            hash to another tree than the lock's line says. Someone edited
+            the copy, or the lock moved on after it was made. Run
+            `refine-fetch --vendor`, which writes the copy anew as the lock
+            has it. To build with an edited copy on purpose, move it out of
+            `vendor/` and name it in a `needs` line as a local path.
+            """
         git_missing: words = """
             `refine-fetch` fetches with git, which it starts as `git` from
             PATH, and there is none. Install git. Nothing else fetches: how
@@ -439,6 +455,13 @@ public about: (which: code) -> (words: []u8) =
             `--update NAME` names a package the lock has no line for. Give
             the names as the lock spells them, `owner/name`, or no name to
             choose every package's version anew.
+            """
+        vendor_foreign: words = """
+            `refine-fetch --vendor` found something under `vendor/` where a
+            package's copy goes, and `vendor/landin.vendor`, the list of
+            what it wrote, does not have it. It overwrites and removes only
+            what it wrote. Move what is there away, or remove it if it is
+            an old copy of the package, and run it again.
             """
     end match
 end about

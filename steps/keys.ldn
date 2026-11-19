@@ -58,15 +58,13 @@ import dev701/refine_build/hash/file
 import dev701/refine_build/hash/sha256
 import dev701/refine_build/hash/tree
 import dev701/refine_build/lifetime
+import dev701/refine_build/packages
 import dev701/refine_build/recipe
 import dev701/refine_build/report
 import dev701/refine_build/text/strings
 
 --  The form's name, which every key's byte string starts with.
 key_form: []u8 = "landin-step-1\n"
-
---  What is in the project's root and is no part of the package.
-left_out: [5][]u8 = [".landin", ".git", ".hg", ".svn", ".jj"]
 
 --  The key of the step `taken`, whose program is the file `tool` and whose
 --  words are `words`.  `common` already holds what `learned` finds out
@@ -134,7 +132,7 @@ learned: (host: blocking.host, lasting: lifetime.memory,
     end for
     if wanted and not common.packages_known then
         common.packages_sum = try tree.of_tree(host, parent, common.project,
-                                               left_out[0..<5])
+                                               packages.left_out[0..<6])
         common.packages_known = true
     end if
     if strings.same(word, "refine") and not common.refine_known then

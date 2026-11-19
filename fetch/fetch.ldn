@@ -51,11 +51,13 @@ import dev701/refine_build/programs
 import dev701/refine_build/report
 import dev701/refine_build/store
 import dev701/refine_build/text/strings
+import dev701/refine_build/vendoring
 
 --- What a fetch is given: the names of the two files, the store's
 --- directory, empty for the user's own, whether versions are chosen anew
---- and for which packages, none meaning all, and whether to only say
---- that the lock serves, fetching nothing.
+--- and for which packages, none meaning all, whether to only say that the
+--- lock serves, fetching nothing, and whether to put a copy of every
+--- package the lock names under `vendor` afterwards.
 public request: type = struct
     package_file: []u8
     lock_file: []u8
@@ -63,6 +65,7 @@ public request: type = struct
     update: bool
     names: [][]u8
     check_only: bool
+    vendor: bool
 end request
 
 --  One package as it was found: at a location, `place`, with the version
@@ -284,20 +287,21 @@ public run: (escaping host: blocking.host, memory: lifetime.memory,
     if asks == 0 and not locked_before then
         said(host, [asked.package_file,
                     " needs and uses nothing; no lock is written\n"])
-        return
-    end if
-    if locked_before and strings.same(new_source, old_source) then
+    elsif locked_before and strings.same(new_source, old_source) then
         said(host, [asked.lock_file, " is as it has to be: ", fetched_count,
                     " fetched, ", local_count, " local\n"])
-        return
+    else
+        try summary(host, memory, st, fresh)
+        files.write_all(host, asked.lock_file, [new_source]) else (problem)
+            gave_up(host, asked.lock_file, problem)
+            fail report.refused
+        end
+        said(host, ["wrote ", asked.lock_file, ": ", fetched_count,
+                    " fetched, ", local_count, " local\n"])
     end if
-    try summary(host, memory, st, fresh)
-    files.write_all(host, asked.lock_file, [new_source]) else (problem)
-        gave_up(host, asked.lock_file, problem)
-        fail report.refused
-    end
-    said(host, ["wrote ", asked.lock_file, ": ", fetched_count, " fetched, ",
-                local_count, " local\n"])
+    if asked.vendor then
+        try vendoring.written(host, memory, parent, kept_in, project, fresh)
+    end if
 end run
 
 --  Choose the packages of one program, the one being built or the tool

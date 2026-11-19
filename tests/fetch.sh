@@ -644,6 +644,111 @@ if fetched "a program that names a fork and uses a tool" unswayed; then
         ends "the program has the fork's 7, the tool wrote 20" "$scratch/unswayed/.landin/out/app/app" 27
     fi
 fi
+#  Vendoring: copies of what the lock names, as plain files in the project.
+#  A PATH with no git in it, for building from the copies alone.
+without_git=$(printf '%s' "$PATH" | tr ':' '\n' | while IFS= read -r directory; do
+    [ -x "$directory/git" ] || printf '%s:' "$directory"
+done)
+without_git=${without_git%:}
+if PATH="$without_git" command -v git > /dev/null 2>&1 \
+    || ! PATH="$without_git" command -v env > /dev/null 2>&1; then
+    echo "no PATH without git could be made here; the copies are built with git in reach"
+    without_git=$PATH
+fi
+#  alone WHAT PROJECT: the build there, with a store that holds nothing and
+#  no git, ends with 0.
+alone() {
+    run=$((run + 1))
+    if ! (cd "$scratch/$2" && PATH="$without_git" "$build" --refine "$refine" \
+        --store "$scratch/store-$2" > "$scratch/said" 2>&1); then
+        cat "$scratch/said"
+        echo "FAILED build: $1: the build failed"
+        failed=$((failed + 1))
+        return 1
+    fi
+}
+if fetched "vendoring a program's packages" uses2 --vendor; then
+    holds "vendoring says what it wrote" '^vendored t/adder 1\.0\.0 to vendor/t/adder$' "$scratch/said"
+    holds "vendoring counts" '^vendor holds 2 packages: 2 written, 0 removed$' "$scratch/said"
+    holds "the list names each copy and its tree" '^holds t/alpha [0-9a-f]{64}$' "$scratch/uses2/vendor/landin.vendor"
+    run=$((run + 1))
+    if [ ! -w "$scratch/uses2/vendor/t/alpha/part/part.ldn" ] || [ -e "$scratch/uses2/vendor/t/alpha/.git" ]; then
+        echo "FAILED fetch: a vendored copy is not plain files that can be written"
+        failed=$((failed + 1))
+    fi
+    #  The keys are the same from the store and from the copies.
+    built "a build after vendoring" uses2 || true
+    holds "a build after vendoring keeps the step" '^step app: kept$' "$scratch/said"
+    if fetched "vendoring again" uses2 --vendor; then
+        holds "copies that are right are left" '^vendor holds 2 packages: 0 written, 0 removed$' "$scratch/said"
+    fi
+    #  Elsewhere: the copies, the lock, an empty store and no git.
+    mkdir "$scratch/vended"
+    cp -R "$scratch/uses2/cmd" "$scratch/uses2/vendor" "$scratch/uses2/landin.package" \
+        "$scratch/uses2/landin.recipe" "$scratch/uses2/landin.lock" "$scratch/vended/"
+    if alone "a build from the copies, with an empty store and no git" vended; then
+        ends "the program built from the copies" "$scratch/vended/.landin/out/app/app" 4
+    fi
+    #  A copy that was edited is not what the lock names.
+    echo '-- edited' >> "$scratch/vended/vendor/t/alpha/part/part.ldn"
+    unbuilt "a build with an edited copy" vended RB0209
+    holds "the refusal names both hashes" 'hashes to [0-9a-f]{64}, and the lock says [0-9a-f]{64}' "$scratch/said"
+    holds "the refusal says both ways on" 'refine-fetch --vendor.*local path' "$scratch/said"
+    if fetched "vendoring over an edited copy" vended --vendor; then
+        holds "the edited copy is written anew" '^vendored t/alpha 1\.2\.0 to vendor/t/alpha$' "$scratch/said"
+        lacks "the copy that was right is left" '^vendored t/adder' "$scratch/said"
+        alone "a build after the copy was written anew" vended || true
+    fi
+fi
+#  After an update only what changed is written, and what the lock no
+#  longer names is removed.
+project shifting "needs example.test/gamma 1.0.0"
+if fetched "vendoring a chain" shifting --vendor; then
+    project shifting "needs example.test/beta 1.0.0"
+    mkdir -p "$scratch/shifting/vendor/mine/thing"
+    echo kept > "$scratch/shifting/vendor/mine/thing/file"
+    if fetched "an update with vendoring" shifting --update --vendor; then
+        holds "the changed package is written" '^vendored t/alpha 1\.0\.0 to vendor/t/alpha$' "$scratch/said"
+        lacks "the unchanged package is not written" '^vendored t/beta' "$scratch/said"
+        holds "the dropped package is removed" '^removed vendor/t/gamma$' "$scratch/said"
+        holds "the counts say so" '^vendor holds 2 packages: 1 written, 1 removed$' "$scratch/said"
+        holds "what refine-fetch did not write is said" '^note: `vendor/mine` is not a copy refine-fetch wrote, and is left as it is' "$scratch/said"
+        run=$((run + 1))
+        if [ -e "$scratch/shifting/vendor/t/gamma" ] || [ ! -f "$scratch/shifting/vendor/mine/thing/file" ] \
+            || grep -q gamma "$scratch/shifting/vendor/landin.vendor"; then
+            echo "FAILED fetch: vendoring after an update left gamma or took what was not its own"
+            failed=$((failed + 1))
+        fi
+    fi
+fi
+#  Something where a copy goes that the list does not have is not touched.
+project inway "needs example.test/alpha 1.0.0"
+mkdir -p "$scratch/inway/vendor/t/alpha"
+echo mine > "$scratch/inway/vendor/t/alpha/file"
+refused "vendoring over what it did not write" inway RF0301 --vendor
+run=$((run + 1))
+if [ "$(cat "$scratch/inway/vendor/t/alpha/file")" != mine ]; then
+    echo "FAILED fetch: vendoring touched what it did not write"
+    failed=$((failed + 1))
+fi
+#  Tools are vendored apart, each with its own packages, and build from
+#  the copies.
+if fetched "vendoring tools" apart --vendor; then
+    holds "a tool's package is under the tool" \
+        '^vendored t/alpha 2\.0\.0 to vendor/for-tools/t/mul3/t/alpha$' "$scratch/said"
+    holds "a tool itself is under its own name there" \
+        '^vendored t/mul3 1\.0\.0 to vendor/for-tools/t/mul3/t/mul3$' "$scratch/said"
+    holds "the program's package is on its own" '^vendored t/alpha 1\.0\.0 to vendor/t/alpha$' "$scratch/said"
+    built "a build after vendoring tools" apart || true
+    holds "the tool is kept after vendoring" '^tool t/mul3: kept$' "$scratch/said"
+    holds "the step is kept after vendoring" '^step app: kept$' "$scratch/said"
+    mkdir "$scratch/vapart"
+    cp -R "$scratch/apart/cmd" "$scratch/apart/vendor" "$scratch/apart/landin.package" \
+        "$scratch/apart/landin.recipe" "$scratch/apart/landin.lock" "$scratch/vapart/"
+    if alone "tools built from the copies, with an empty store and no git" vapart; then
+        ends "the program and both tools, from the copies" "$scratch/vapart/.landin/out/app/app" 51
+    fi
+fi
 #  A package that is used and gives no program.
 program toolless "core/io" "0" "uses example.test/alpha 1.0.0"
 printf 'step app with packages\n%s\n' "$compile" | sed 's/NAME/toolless/' > "$scratch/toolless/landin.recipe"

@@ -102,6 +102,7 @@ refine-fetch                  # make the lock say what the description asks for
 refine-fetch --update         # choose every version anew
 refine-fetch --update t/name  # or those of the packages named
 refine-fetch --check          # say whether lock and store serve; fetch nothing
+refine-fetch --vendor         # then copy every locked package into vendor/
 ```
 
 It reads `landin.package`, finds every package that is needed, directly or
@@ -202,6 +203,41 @@ Keep the lock with the sources. `refine-fetch` writes it; do not write it
 by hand. A lock that starts with `lock 1` is from before tools were chosen
 apart: `refine-build` refuses it, and `refine-fetch` writes it anew.
 
+### Copies in the project: `vendor/`
+
+`refine-fetch --vendor` makes the lock right as always and then writes a
+copy of every package the lock names, as plain files, into `vendor/` in the
+package's directory. With the copies and the lock, `refine-build` builds on
+a machine whose store holds nothing and that has no git.
+
+```
+vendor/OWNER/NAME/...                  a package of the program
+vendor/for-tools/TOOL/OWNER/NAME/...   a package of the tool TOOL, the tool itself among them
+vendor/landin.vendor                   the list of what was written
+```
+
+- **A tool's packages are apart from the program's,** as in the lock:
+  each may hold another version of one name. `TOOL` is the tool's
+  `owner/name`; no owner can be spelled `for-tools`.
+- **`refine-build` takes a package from its copy** when one is there. The
+  copy has to hash to the tree the lock names, so a step's key is the same
+  whether a package came from the store or from `vendor/`. A copy that
+  hashes differently is refused, with both hashes: run
+  `refine-fetch --vendor` to write it anew, or move it out of `vendor/`
+  and name it as a local path to build with it as it is. A project may
+  hold copies of some packages only; the rest come from the store.
+- **Only what differs is written.** A copy that hashes to the lock's tree
+  is left as it is, and a copy of a package the lock no longer names is
+  removed.
+- **It touches only what it wrote.** `vendor/landin.vendor` lists the
+  copies. Something else where a copy goes is refused, and anything else
+  under `vendor/` is left as it is and said in a note.
+- **A package from a local path is not copied;** it is the copy that is
+  there.
+- **`vendor/` at a package's top is no part of the package:** it is left
+  out of the package's own hash, as `.landin` is, since each copy is
+  hashed as itself.
+
 ### What `refine-fetch` trusts
 
 - **git and its configuration.** A location is given to git as
@@ -272,6 +308,7 @@ In the project, everything the tool writes is under `.landin/`:
 | `.landin/failed/STEP` | A link to what a step wrote before it failed, until it runs again. |
 | `.landin/packages` | This package and every one it needs or uses, each under its `owner/name`. Made anew by every build. |
 | `.landin/tools/OWNER/NAME/view` | What a tool's programs were compiled in. |
+| `.landin/tools/OWNER/NAME/packages` | The tool's own `packages`: itself and what it is built with. |
 
 ## The store
 
@@ -303,7 +340,7 @@ What a program is: for `refine`, what `refine version --json` says of its
 source, mode and dirtiness, and the content of the library it names; for
 any other program, the content of its executable file. An input is a
 step's entry, a file's or directory's content, or for `packages` the whole
-checkout without `.landin` and the version control's directory.
+checkout without `.landin`, the version control's directory and `vendor`.
 
 `store/store.ldn` and `steps/keys.ldn` give both forms exactly.
 
@@ -320,7 +357,8 @@ entries are read-only: `chmod -R u+w` it first.
 | `command/` | What both programs do the same way: the command line, `explain`, completions. |
 | `fetch/` | Choosing versions, git, and writing the lock. |
 | `lock/` | Reading and writing `landin.lock`. |
-| `packages/` | The packages of a program, as the lock and the store give them. |
+| `packages/` | The packages of a program, and of each tool, as the lock, the store and `vendor/` give them. |
+| `vendoring/` | Writing the copies under `vendor/` and the list of them. |
 | `programs/` | Running a program for what it answers. |
 | `text/lines/` | The reader for keyword-first line files. |
 | `text/strings/` | Byte strings: copies and comparisons. |
@@ -446,7 +484,8 @@ process, as a watch mode will, without the memory in use growing.
 - A tool's programs are found by their names, before PATH. Two tools with
   a program of one name are not told apart: the later `uses` line wins.
 - Only git is fetched from, over `https://`; a commit has to be on a
-  branch or a tag to be found. Nothing is vendored into the project.
+  branch or a tag to be found.
+- A vendored copy is hashed whole on every build, to hold it to the lock.
 - Two builds at once in one project directory are not guarded against each
   other: they share `.landin/`. Two projects on one store are.
 - Nothing removes what the store no longer needs, nor what a build that was
