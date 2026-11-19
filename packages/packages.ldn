@@ -2,6 +2,11 @@
 -- package being built is not among them, every other is, each with where
 -- its files are, what they hash to and which of the others it needs.
 --
+-- A tool, a package the description `uses`, is a program of its own: its
+-- packages are found apart, from the lock's `for` lines, and it may hold
+-- another version of a package than the program does.  Nothing the
+-- program holds is given to a tool, and nothing of a tool to the program.
+--
 -- Nothing here fetches.  A package from a location is the store's entry
 -- that the lock names for it; a package from a local path is that
 -- directory as it is.  A lock that does not say what a description asks
@@ -31,35 +36,36 @@ public left_out: [5][]u8 = [".landin", ".git", ".hg", ".svn", ".jj"]
 public package_file: []u8 = "landin.package"
 
 --- One package: its `owner/name`, the directory that holds it, the 64
---- hexadecimal digits of its tree hash, whether it is a local path's,
---- whether the package being built `uses` it, its description, and the
---- indices of the packages it needs.
+--- hexadecimal digits of its tree hash, whether it is a local path's, its
+--- description, and the indices of the packages it needs.
 public package: type = struct
     name: []u8
     path: []u8
     tree: []u8
     local: bool
-    tool: bool
     about: description.description
     needs: vec.list(usize)
 end package
 
---- The packages of a program, and which of them the package being built
---- `needs` and `uses`.
+--- The packages of one program, and which of them the program's own
+--- package `needs`.
 public set: type = struct
     all: vec.list(package)
     needs: vec.list(usize)
-    uses: vec.list(usize)
 end set
+
+--- A tool: its own package, and the packages it is built with.
+public tooling: type = struct
+    itself: package
+    beside: set
+end tooling
 
 --- No package of the name is in the set.
 public missing: atom
 
---- A set with no package: what a description without `needs` and `uses`
---- has.
+--- A set with no package: what a description without `needs` has.
 public none_needed: () -> (found: set) =
-    found = (all: vec.new(item: package), needs: vec.new(item: usize),
-             uses: vec.new(item: usize))
+    found = (all: vec.new(item: package), needs: vec.new(item: usize))
 end none_needed
 
 --- The index of the package called `name`.
@@ -74,7 +80,7 @@ public named: (found: set, name: []u8) -> (index: usize) ! missing =
 end named
 
 --- The packages the description `about` of the package in `project`
---- brings in, as the lock `locks` and the store `kept_in` give them.
+--- `needs`, as the lock `locks` and the store `kept_in` give them.
 --- `lock_file` is the lock's name, for what is said.  Everything lives as
 --- long as `memory`.
 public locked: (host: blocking.host, memory: lifetime.memory,
@@ -82,20 +88,94 @@ public locked: (host: blocking.host, memory: lifetime.memory,
                 project: []u8, lock_file: []u8,
                 about: description.description, locks: lock.lock)
                -> (found: set) ! report.refused =
+    found = try rooted(host, memory, parent, kept_in, lock_file, locks, "",
+                       project, true, package_file, vec.used(about.needs))
+end locked
+
+--- The tool that `want`, a `uses` line of the package in `project`, asks
+--- for, and the packages it is built with, as the lock and the store give
+--- them.
+public tool_locked: (host: blocking.host, memory: lifetime.memory,
+                     parent: lifetime.parent, kept_in: store.store,
+                     project: []u8, lock_file: []u8,
+                     want: description.requirement, locks: lock.lock)
+                    -> (found: tooling) ! report.refused =
+    mut path: []u8 = try glued(host, memory, [want.place])
+    mut hash: []u8 = ""
+    if want.local then
+        if path[0] <> u8('/') then
+            path = try glued(host, memory, [project, "/", want.place])
+        end if
+        sum: sha256.digest = try tree.of_tree(host, parent, path,
+                                              left_out[0..<5])
+        spelled: sha256.spelling = sha256.hex(sum)
+        hash = try glued(host, memory, [spelled[0..<64]])
+    else
+        line_at: usize = lock.tool_placed(locks, want.place) else (problem)
+            _ = problem
+            report.at_line(host, codes.lock_stale, lock_file, 0,
+                           ["no `tool` line for `", want.place, "`, which ",
+                            package_file,
+                            " uses; run `refine-fetch` in the package's directory"])
+            fail report.refused
+        end
+        lines: []lock.line = vec.used(locks.lines)
+        line: lock.line = lines[line_at]
+        try served(host, lock_file, package_file, want, line)
+        path = try held_at(host, memory, kept_in, lock_file, line)
+        hash = try glued(host, memory, [line.tree])
+    end if
+    about: description.description = try described(host, memory, path)
+    name: []u8 = try glued(host, memory, [about.owner, "/", about.name])
+    if not want.local then
+        lines: []lock.line = vec.used(locks.lines)
+        again_at: usize = lock.tool_placed(locks, want.place) else (problem)
+            _ = problem
+            0
+        end
+        try called(host, lock_file, lines[again_at], name)
+    end if
+    beside: set = try rooted(host, memory, parent, kept_in, lock_file, locks,
+                             name, path, want.local, name,
+                             vec.used(about.needs))
+    mut itself: package = (name: name, path: path, tree: hash,
+                           local: want.local, about: about,
+                           needs: vec.new(item: usize))
+    for index in vec.used(beside.needs) do
+        try noted(host, memory, itself.needs, index)
+    end for
+    for item in vec.used(beside.all) do
+        if strings.same(item.name, itself.name) then
+            report.say(host, codes.package_wrong,
+                       ["the tool `", itself.name,
+                        "` is built with a package of its own name, at `",
+                        item.path, "`; a program holds a name once"])
+            fail report.refused
+        end if
+    end for
+    found = (itself: itself, beside: beside)
+end tool_locked
+
+--  The packages `wants` bring in for the program `root` names, the one
+--  being built when it is empty and else a tool.  `base` is the
+--  directory of the package that has the wants, `may_local` whether it
+--  may name local paths, and `asker` what it is called in what is said.
+rooted: (host: blocking.host, memory: lifetime.memory,
+         parent: lifetime.parent, kept_in: store.store, lock_file: []u8,
+         locks: lock.lock, root: []u8, base: []u8, may_local: bool,
+         asker: []u8, wants: []description.requirement)
+        -> (found: set) ! report.refused =
     found = none_needed()
-    --  First every package a local path names, from the package being
-    --  built on: what stands in for a location has to be known before a
+    --  First every package a local path names, from the asking package
+    --  on: what stands in for a location has to be known before a
     --  location is looked up.
-    for want in vec.used(about.needs) do
-        if want.local then
-            _ = try local_at(host, memory, parent, found, project, want)
-        end if
-    end for
-    for want in vec.used(about.uses) do
-        if want.local then
-            _ = try local_at(host, memory, parent, found, project, want)
-        end if
-    end for
+    if may_local then
+        for want in wants do
+            if want.local then
+                _ = try local_at(host, memory, parent, found, base, want)
+            end if
+        end for
+    end if
     mut at: usize = 0
     while at < vec.length(found.all) do
         item: brief = try got(host, memory, found, at)
@@ -108,22 +188,11 @@ public locked: (host: blocking.host, memory: lifetime.memory,
     end while
     --  Then what each one needs, the fetched ones joining the list as
     --  they are first asked for.
-    for want in vec.used(about.needs) do
+    for want in wants do
         index: usize = try wanted(host, memory, parent, kept_in, lock_file,
-                                  locks, found, project, true,
-                                  package_file, want)
+                                  locks, root, found, base, may_local, asker,
+                                  want)
         try noted(host, memory, found.needs, index)
-    end for
-    for want in vec.used(about.uses) do
-        index: usize = try wanted(host, memory, parent, kept_in, lock_file,
-                                  locks, found, project, true,
-                                  package_file, want)
-        try noted(host, memory, found.uses, index)
-        slot: ptr mut package = vec.at(found.all, index) else (problem)
-            gave_up(host, lock_file, problem)
-            fail report.refused
-        end
-        slot.val.tool = true
     end for
     at = 0
     while at < vec.length(found.all) do
@@ -131,8 +200,8 @@ public locked: (host: blocking.host, memory: lifetime.memory,
         mut needs := vec.new(item: usize)
         for want in vec.used(item.needs) do
             index: usize = try wanted(host, memory, parent, kept_in,
-                                      lock_file, locks, found, item.path,
-                                      item.local, item.name, want)
+                                      lock_file, locks, root, found,
+                                      item.path, item.local, item.name, want)
             try noted(host, memory, needs, index)
         end for
         slot: ptr mut package = vec.at(found.all, at) else (problem)
@@ -142,15 +211,67 @@ public locked: (host: blocking.host, memory: lifetime.memory,
         slot.val.needs = needs
         inc at
     end while
-end locked
+end rooted
+
+--  Refuse unless the lock's `line` gives what `want` of `asker` asks for.
+served: (host: blocking.host, lock_file: []u8, asker: []u8,
+         want: description.requirement, line: lock.line)
+        -> none ! report.refused =
+    mut serves: bool = false
+    if lenof want.commit > 0 then
+        serves = strings.same(line.commit, want.commit)
+    else
+        serves = description.serves(line.version, want.version)
+    end if
+    return when serves
+    asked: []u8 = if lenof want.commit > 0 then want.commit
+                  else want.version end if
+    has: []u8 = if lenof line.version > 0 then line.version
+                else line.commit end if
+    report.at_line(host, codes.lock_stale, lock_file, 0,
+                   ["`", asker, "` asks for `", want.place, "` at ", asked,
+                    " and the lock has it at ", has,
+                    "; run `refine-fetch` in the package's directory"])
+    fail report.refused
+end served
+
+--  The directory that holds what the lock's `line` names: its entry in
+--  the store.
+held_at: (host: blocking.host, memory: lifetime.memory,
+          kept_in: store.store, lock_file: []u8, line: lock.line)
+         -> (path: []u8) ! report.refused =
+    path = try glued(host, memory, [kept_in.root, "/entries/", line.tree])
+    held: files.found = files.kind_of(host, path) else (problem)
+        gave_up(host, path, problem)
+        fail report.refused
+    end
+    if held <> io.subdirectory then
+        report.at_line(host, codes.entry_missing, lock_file, 0,
+                       ["the store at `", kept_in.root, "` does not hold `",
+                        line.name,
+                        "` as the lock names it; run `refine-fetch` in the package's directory"])
+        fail report.refused
+    end if
+end held_at
+
+--  Refuse unless the description of what `line` names calls it `name`.
+called: (host: blocking.host, lock_file: []u8, line: lock.line, name: []u8)
+        -> none ! report.refused =
+    return when strings.same(name, line.name)
+    report.at_line(host, codes.package_wrong, lock_file, 0,
+                   ["the lock calls what `", line.place, "` holds `",
+                    line.name, "`, and its description says `", name,
+                    "`; `refine-fetch --update` writes the lock anew"])
+    fail report.refused
+end called
 
 --  The index of the package that `want` of `asker` asks for, which joins
 --  the set when it is not in it.  `base` is the asker's directory and
 --  `may_local` whether it may name a local path.
 wanted: (host: blocking.host, memory: lifetime.memory,
          parent: lifetime.parent, kept_in: store.store, lock_file: []u8,
-         locks: lock.lock, inout found: set, base: []u8, may_local: bool,
-         asker: []u8, want: description.requirement)
+         locks: lock.lock, root: []u8, inout found: set, base: []u8,
+         may_local: bool, asker: []u8, want: description.requirement)
         -> (index: usize) ! report.refused =
     if want.local then
         if not may_local then
@@ -164,7 +285,7 @@ wanted: (host: blocking.host, memory: lifetime.memory,
         return
     end if
     mut stands: bool = true
-    other: []u8 = lock.stood_in(locks, want.place) else (problem)
+    other: []u8 = lock.stood_in(locks, root, want.place) else (problem)
         _ = problem
         stands = false
         ""
@@ -180,7 +301,7 @@ wanted: (host: blocking.host, memory: lifetime.memory,
             index = at_name
             return
         end if
-        line_at: usize = lock.named(locks, other) else (problem)
+        line_at: usize = lock.named(locks, root, other) else (problem)
             _ = problem
             report.at_line(host, codes.lock_stale, lock_file, 0,
                            ["`", other, "` stands in for `", want.place,
@@ -192,7 +313,7 @@ wanted: (host: blocking.host, memory: lifetime.memory,
                                 found, line_at)
         return
     end if
-    line_at: usize = lock.placed(locks, want.place) else (problem)
+    line_at: usize = lock.placed(locks, root, want.place) else (problem)
         _ = problem
         report.at_line(host, codes.lock_stale, lock_file, 0,
                        ["no line for `", want.place, "`, which `", asker,
@@ -200,24 +321,7 @@ wanted: (host: blocking.host, memory: lifetime.memory,
         fail report.refused
     end
     lines: []lock.line = vec.used(locks.lines)
-    line: lock.line = lines[line_at]
-    mut serves: bool = false
-    if lenof want.commit > 0 then
-        serves = strings.same(line.commit, want.commit)
-    else
-        serves = description.serves(line.version, want.version)
-    end if
-    if not serves then
-        asked: []u8 = if lenof want.commit > 0 then want.commit
-                      else want.version end if
-        has: []u8 = if lenof line.version > 0 then line.version
-                    else line.commit end if
-        report.at_line(host, codes.lock_stale, lock_file, 0,
-                       ["`", asker, "` asks for `", want.place, "` at ",
-                        asked, " and the lock has it at ", has,
-                        "; run `refine-fetch` in the package's directory"])
-        fail report.refused
-    end if
+    try served(host, lock_file, asker, want, lines[line_at])
     index = try line_loaded(host, memory, kept_in, lock_file, locks, found,
                             line_at)
 end wanted
@@ -240,32 +344,14 @@ line_loaded: (host: blocking.host, memory: lifetime.memory,
         index = at_name
         return
     end if
-    path: []u8 = try glued(host, memory,
-                           [kept_in.root, "/entries/", line.tree])
-    held: files.found = files.kind_of(host, path) else (problem)
-        gave_up(host, path, problem)
-        fail report.refused
-    end
-    if held <> io.subdirectory then
-        report.at_line(host, codes.entry_missing, lock_file, 0,
-                       ["the store at `", kept_in.root, "` does not hold `",
-                        line.name,
-                        "` as the lock names it; run `refine-fetch` in the package's directory"])
-        fail report.refused
-    end if
+    path: []u8 = try held_at(host, memory, kept_in, lock_file, line)
     about: description.description = try described(host, memory, path)
     name: []u8 = try glued(host, memory, [about.owner, "/", about.name])
-    if not strings.same(name, line.name) then
-        report.at_line(host, codes.package_wrong, lock_file, 0,
-                       ["the lock calls what `", line.place, "` holds `",
-                        line.name, "`, and its description says `", name,
-                        "`; `refine-fetch --update` writes the lock anew"])
-        fail report.refused
-    end if
+    try called(host, lock_file, line, name)
     index = vec.length(found.all)
     fetched: package = (name: name, path: path,
                         tree: try glued(host, memory, [line.tree]),
-                        local: false, tool: false, about: about,
+                        local: false, about: about,
                         needs: vec.new(item: usize))
     vec.push(found.all, memory, fetched) else (problem)
         gave_up(host, lock_file, problem)
@@ -300,7 +386,7 @@ local_at: (host: blocking.host, memory: lifetime.memory,
     index = vec.length(found.all)
     here: package = (name: name, path: path,
                      tree: try glued(host, memory, [spelled[0..<64]]),
-                     local: true, tool: false, about: about,
+                     local: true, about: about,
                      needs: vec.new(item: usize))
     vec.push(found.all, memory, here) else (problem)
         gave_up(host, path, problem)
@@ -382,19 +468,20 @@ glued: (host: blocking.host, memory: lifetime.memory, parts: [][]u8)
     end
 end glued
 
---- Check the imports of the package in `project`, called `own`, and of
---- every package of `found`: a source file may import its own package's
+--- Check the imports of the package in `root`, called `own`, and of
+--- every package of `found`, the packages it is built with: a source file may import its own package's
 --- modules, the library's, and those of the packages its package's
 --- description `needs`.  The imports are read from each `.ldn` file's
 --- lines that start with `import`; this is a scan, not the compiler's
 --- view.  A directory that holds a `landin.package` of its own is another
 --- package and is not looked into.  Every breach is said, with its file
---- and line, and then the check fails.
+--- and line, a path under `shown_from` without it when that is not
+--- empty, and then the check fails.
 public imports_checked: (host: blocking.host, parent: lifetime.parent,
-                         found: set, project: []u8, own: []u8)
-                        -> none ! report.refused =
+                         found: set, shown_from: []u8, root: []u8,
+                         own: []u8) -> none ! report.refused =
     mut wrong: bool = false
-    try one_checked(host, parent, found, project, project, own,
+    try one_checked(host, parent, found, shown_from, root, own,
                     vec.used(found.needs), wrong)
     for item in vec.used(found.all) do
         try one_checked(host, parent, found, "", item.path, item.name,

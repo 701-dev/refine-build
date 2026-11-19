@@ -20,6 +20,14 @@
 -- names that package itself, or holds it in a local path: then that one
 -- is taken for all, and a note says so.
 --
+-- Tools.  A package the description `uses` is a program of its own, and
+-- what it needs is chosen apart, as if this ran in the tool's directory
+-- with no lock there: among a tool's packages the rules above hold with
+-- the tool in the place of the package being built, and nothing chosen
+-- for the program, or named by it, reaches a tool.  So a tool may hold
+-- another version of a package than the program does.  A tool's packages
+-- are the lock's `for` lines.
+--
 -- The lock.  A line the lock has is kept while it serves: its commit and
 -- tree are what is fetched, and no tag is asked.  What is fetched for a
 -- line has to hash to the line's tree.  `update` chooses the versions of
@@ -87,7 +95,18 @@ ask: type = struct
     tool: bool
 end ask
 
---  What one fetch knows.
+--  What the summary says of one of the new lock's lines.
+fact: type = struct
+    tool: bool
+    root: []u8
+    name: []u8
+    path: []u8
+    licence: []u8
+end fact
+
+--  What one fetch knows.  `root` is the tool whose packages are being
+--  chosen, empty for the program's, and `label` what its description is
+--  called in what is said.
 state: type = struct
     asked: request
     kept_in: store.store
@@ -95,6 +114,9 @@ state: type = struct
     variables: []io.variable
     git: []u8
     fetched: vec.list([]u8)
+    root: []u8
+    label: []u8
+    facts: vec.list(fact)
     seen: vec.list(node)
     nodes: vec.list(node)
     queue: vec.list(ask)
@@ -142,7 +164,7 @@ public run: (escaping host: blocking.host, memory: lifetime.memory,
     end
     mut old: lock.lock = lock.empty()
     if locked_before then
-        old = lock.read(host, memory, asked.lock_file, old_source)
+        old = lock.read(host, memory, asked.lock_file, old_source, true)
             else (problem)
             command.said(host, problem)
             fail report.refused
@@ -157,24 +179,41 @@ public run: (escaping host: blocking.host, memory: lifetime.memory,
                             " has `needs` or `uses` lines; run `refine-fetch` without `--check` to write it"])
             fail report.refused
         end if
+        if lock.is_earlier(old_source) then
+            report.at_line(host, codes.lock_stale, asked.lock_file, 1,
+                           ["this is a lock of the form `lock 1`, from before a tool's packages were chosen apart from the program's; run `refine-fetch` without `--check`, which writes it anew"])
+            fail report.refused
+        end if
         found: packages.set =
             try packages.locked(host, memory, parent, kept_in, project,
                                 asked.lock_file, about, old)
         said(host, [asked.lock_file, " gives what ", asked.package_file,
                     " asks for: ", try number(host, memory,
                                               u64(vec.length(found.all))),
-                    " packages\n"])
+                    " packages for the program\n"])
+        for want in vec.used(about.uses) do
+            made_of: packages.tooling =
+                try packages.tool_locked(host, memory, parent, kept_in,
+                                         project, asked.lock_file, want, old)
+            said(host, ["the tool ", made_of.itself.name, ": ",
+                        try number(host, memory,
+                                   u64(vec.length(made_of.beside.all))),
+                        " packages of its own\n"])
+        end for
         return
     end if
     for name in asked.names do
-        _ = lock.named(old, name) else (problem)
-            _ = problem
+        if not lock.mentions(old, name) then
             report.say(host, codes.name_unlocked,
                        ["`--update ", name, "`: ", asked.lock_file,
                         " has no line for a package of that name"])
             fail report.refused
-        end
+        end if
     end for
+    if lock.is_earlier(old_source) then
+        note(host, [asked.lock_file,
+                    " is of the form `lock 1`; it is written anew, each tool's packages chosen apart"])
+    end if
     mut variables := vec.new(item: io.variable)
     programs.environment(host, memory, variables) else (problem)
         gave_up(host, "the environment", problem)
@@ -182,62 +221,58 @@ public run: (escaping host: blocking.host, memory: lifetime.memory,
     end
     mut st: state = (asked: asked, kept_in: kept_in, old: old,
                      variables: vec.used(variables), git: "",
-                     fetched: vec.new(item: []u8), seen: vec.new(item: node),
+                     fetched: vec.new(item: []u8), root: "",
+                     label: asked.package_file, facts: vec.new(item: fact),
+                     seen: vec.new(item: node),
                      nodes: vec.new(item: node), queue: vec.new(item: ask),
                      homes: vec.new(item: lock.stand_in),
                      instead: vec.new(item: lock.stand_in))
-    --  The package being built speaks first, so what it names is known
-    --  when another package asks for the same name from elsewhere.
-    for want in vec.used(about.needs) do
-        first: ask = (want: want, asker: asked.package_file, base: project,
-                      by_root: true, tool: false)
-        try queued(host, memory, st, first)
-    end for
-    for want in vec.used(about.uses) do
-        first: ask = (want: want, asker: asked.package_file, base: project,
-                      by_root: true, tool: true)
-        try queued(host, memory, st, first)
-    end for
-    mut at: usize = 0
-    while at < vec.length(st.queue) do
-        next: ask = vec.get(st.queue, at) else (problem)
-            gave_up(host, "the packages", problem)
-            fail report.refused
-        end
-        try handled(host, memory, parent, st, next)
-        inc at
-    end while
-    try reached(host, memory, st, project, about)
     mut fresh: lock.lock = lock.empty()
     mut locals: usize = 0
-    for item in vec.used(st.nodes) do
-        continue when not item.live
-        if item.local then
-            inc locals
-            continue
+    --  The program's packages.
+    try chosen(host, memory, parent, st, asked.package_file, project,
+               vec.used(about.needs), fresh, locals)
+    --  Each tool, and its packages apart.
+    mut tools := vec.new(item: []u8)
+    for want in vec.used(about.uses) do
+        st.root = ""
+        st.label = asked.package_file
+        first: ask = (want: want, asker: asked.package_file, base: project,
+                      by_root: true, tool: true)
+        itself: node = try tool_found(host, memory, parent, st, first)
+        if listed(vec.used(tools), itself.name) then
+            report.say(host, codes.locations_clash,
+                       ["the tool `", itself.name, "` is used twice by ",
+                        asked.package_file, ", from `", itself.place,
+                        "` and from elsewhere; use it once"])
+            fail report.refused
         end if
-        line: lock.line = (tool: item.tool and not item.needed,
-                           name: item.name, place: item.place,
-                           version: item.version, commit: item.commit,
-                           tree: item.tree)
-        vec.push(fresh.lines, memory, line) else (problem)
-            gave_up(host, asked.lock_file, problem)
+        vec.push(tools, memory, itself.name) else (problem)
+            gave_up(host, itself.name, problem)
             fail report.refused
         end
-    end for
-    for item in vec.used(st.instead) do
-        mut wanted: bool = false
-        for other in vec.used(st.nodes) do
-            if other.live and strings.same(other.name, item.name)
-              and not strings.same(other.place, item.place) then
-                wanted = true
-            end if
-        end for
-        continue when not wanted or stands_in(fresh, item.place)
-        vec.push(fresh.instead, memory, item) else (problem)
-            gave_up(host, asked.lock_file, problem)
-            fail report.refused
-        end
+        if itself.local then
+            inc locals
+        else
+            line: lock.line = (tool: true, root: "", name: itself.name,
+                               place: itself.place, version: itself.version,
+                               commit: itself.commit, tree: itself.tree)
+            vec.push(fresh.lines, memory, line) else (problem)
+                gave_up(host, asked.lock_file, problem)
+                fail report.refused
+            end
+            about_it: fact = (tool: true, root: "", name: itself.name,
+                              path: itself.path, licence: itself.licence)
+            vec.push(st.facts, memory, about_it) else (problem)
+                gave_up(host, asked.lock_file, problem)
+                fail report.refused
+            end
+        end if
+        st.root = itself.name
+        st.label = try glued(host, memory, ["the tool `", itself.name, "`"])
+        base: []u8 = if itself.local then itself.path else "" end if
+        try chosen(host, memory, parent, st, itself.name, base,
+                   vec.used(itself.needs), fresh, locals)
     end for
     new_source: []u8 = lock.written(memory, fresh) else (problem)
         gave_up(host, asked.lock_file, problem)
@@ -265,6 +300,123 @@ public run: (escaping host: blocking.host, memory: lifetime.memory,
                 local_count, " local\n"])
 end run
 
+--  Choose the packages of one program, the one being built or the tool
+--  `st.root` names: `wants` are what its own description needs, `asker`
+--  what that description is called and `base` its directory when it may
+--  name local paths, else empty.  The lines join `fresh`.
+chosen: (escaping host: blocking.host, memory: lifetime.memory,
+         parent: lifetime.parent, escaping inout st: state,
+         escaping asker: []u8, escaping base: []u8,
+         escaping wants: []description.requirement,
+         escaping inout fresh: lock.lock, inout locals: usize)
+        -> none ! report.refused =
+    st.nodes = vec.new(item: node)
+    st.queue = vec.new(item: ask)
+    st.homes = vec.new(item: lock.stand_in)
+    st.instead = vec.new(item: lock.stand_in)
+    --  The program's own package speaks first, so what it names is known
+    --  when another package asks for the same name from elsewhere.
+    for want in wants do
+        first: ask = (want: want, asker: asker, base: base, by_root: true,
+                      tool: false)
+        try queued(host, memory, st, first)
+    end for
+    mut at: usize = 0
+    while at < vec.length(st.queue) do
+        next: ask = vec.get(st.queue, at) else (problem)
+            gave_up(host, "the packages", problem)
+            fail report.refused
+        end
+        try handled(host, memory, parent, st, next)
+        inc at
+    end while
+    try reached(host, memory, st, base, wants)
+    mut told := vec.new(item: fact)
+    for item in vec.used(st.nodes) do
+        continue when not item.live
+        if item.local then
+            inc locals
+            continue
+        end if
+        --  Copies, so that the lock's lines do not look into the state.
+        line: lock.line =
+            (tool: false, root: try glued(host, memory, [st.root]),
+             name: try glued(host, memory, [item.name]),
+             place: try glued(host, memory, [item.place]),
+             version: try glued(host, memory, [item.version]),
+             commit: try glued(host, memory, [item.commit]),
+             tree: try glued(host, memory, [item.tree]))
+        vec.push(fresh.lines, memory, line) else (problem)
+            gave_up(host, st.asked.lock_file, problem)
+            fail report.refused
+        end
+        about_it: fact = (tool: false,
+                          root: try glued(host, memory, [st.root]),
+                          name: try glued(host, memory, [item.name]),
+                          path: try glued(host, memory, [item.path]),
+                          licence: try glued(host, memory, [item.licence]))
+        vec.push(told, memory, about_it) else (problem)
+            gave_up(host, st.asked.lock_file, problem)
+            fail report.refused
+        end
+    end for
+    for about_it in vec.used(told) do
+        vec.push(st.facts, memory, about_it) else (problem)
+            gave_up(host, st.asked.lock_file, problem)
+            fail report.refused
+        end
+    end for
+    for item in vec.used(st.instead) do
+        mut wanted: bool = false
+        for other in vec.used(st.nodes) do
+            if other.live and strings.same(other.name, item.name)
+              and not strings.same(other.place, item.place) then
+                wanted = true
+            end if
+        end for
+        continue when not wanted or stands_in(fresh, st.root, item.place)
+        other: lock.stand_in =
+            (root: try glued(host, memory, [st.root]),
+             place: try glued(host, memory, [item.place]),
+             name: try glued(host, memory, [item.name]))
+        vec.push(fresh.instead, memory, other) else (problem)
+            gave_up(host, st.asked.lock_file, problem)
+            fail report.refused
+        end
+    end for
+end chosen
+
+--  Whether `name` is one of `names`.
+listed: (names: [][]u8, name: []u8) -> (yes: bool) =
+    yes = false
+    for other in names do
+        if strings.same(other, name) then yes = true end if
+    end for
+end listed
+
+--  The tool `next` asks for: from its local path, or fetched as the
+--  lock's `tool` line says while that serves.
+tool_found: (escaping host: blocking.host, memory: lifetime.memory,
+             parent: lifetime.parent, inout st: state, escaping next: ask)
+            -> (found: node) ! report.refused =
+    if not next.want.local then
+        found = try materialised(host, memory, parent, st, next, true)
+        return
+    end if
+    mut path: []u8 = try glued(host, memory, [next.want.place])
+    if path[0] <> u8('/') then
+        path = try glued(host, memory, [next.base, "/", next.want.place])
+    end if
+    about: description.description =
+        try packages.described(host, memory, path)
+    found = (name: try glued(host, memory, [about.owner, "/", about.name]),
+             place: path, version: "", commit: "", tree: "", path: path,
+             licence: about.licence,
+             asker: try glued(host, memory, [next.asker]), local: true,
+             by_root: true, tool: true, live: true, needed: false,
+             needs: about.needs)
+end tool_found
+
 --  Deal with one thing asked for: find the package, and take it, leave
 --  it for the one there is, or refuse.
 handled: (escaping host: blocking.host, memory: lifetime.memory,
@@ -274,7 +426,7 @@ handled: (escaping host: blocking.host, memory: lifetime.memory,
         try local_taken(host, memory, st, next)
         return
     end if
-    mut found: node = try materialised(host, memory, parent, st, next)
+    mut found: node = try materialised(host, memory, parent, st, next, false)
     place: []u8 = next.want.place
     try homed(host, memory, st, place, found.name)
     mut there: bool = true
@@ -299,7 +451,7 @@ handled: (escaping host: blocking.host, memory: lifetime.memory,
         if existing.by_root then
             try stood(host, memory, st, place, found.name)
             note(host, ["`", found.name, "` is taken from `", existing.place,
-                        "`, which ", st.asked.package_file,
+                        "`, which ", st.label,
                         " names, not from `", place, "`, which `",
                         next.asker, "` asks for"])
             return
@@ -307,7 +459,7 @@ handled: (escaping host: blocking.host, memory: lifetime.memory,
         if next.by_root then
             try stood(host, memory, st, existing.place, found.name)
             note(host, ["`", found.name, "` is taken from `", place,
-                        "`, which ", st.asked.package_file,
+                        "`, which ", st.label,
                         " names, not from `", existing.place, "`, which `",
                         existing.asker, "` asks for"])
             found.tool = found.tool or existing.tool
@@ -319,7 +471,7 @@ handled: (escaping host: blocking.host, memory: lifetime.memory,
                     "`, which `", existing.asker, "` asks for, and at `",
                     place, "`, which `", next.asker,
                     "` asks for; name the one to take for both in a `needs` line of ",
-                    st.asked.package_file])
+                    st.label])
         fail report.refused
     end if
     found.by_root = found.by_root or existing.by_root
@@ -367,7 +519,7 @@ handled: (escaping host: blocking.host, memory: lifetime.memory,
                 " by `", existing.asker, "` and at ", shown(found), " by `",
                 next.asker,
                 "`; name the one to take in a `needs` line of ",
-                st.asked.package_file])
+                st.label])
     fail report.refused
 end handled
 
@@ -473,7 +625,7 @@ homed: (host: blocking.host, memory: lifetime.memory, inout st: state,
     for item in vec.used(st.homes) do
         return when strings.same(item.place, place)
     end for
-    home: lock.stand_in = (place: place, name: name)
+    home: lock.stand_in = (root: "", place: place, name: name)
     vec.push(st.homes, memory, home) else (problem)
         gave_up(host, name, problem)
         fail report.refused
@@ -484,18 +636,20 @@ end homed
 stood: (host: blocking.host, memory: lifetime.memory, inout st: state,
         escaping place: []u8, escaping name: []u8)
        -> none ! report.refused =
-    other: lock.stand_in = (place: place, name: name)
+    other: lock.stand_in = (root: "", place: place, name: name)
     vec.push(st.instead, memory, other) else (problem)
         gave_up(host, name, problem)
         fail report.refused
     end
 end stood
 
---  Whether `value` has an `instead` line for `place`.
-stands_in: (value: lock.lock, place: []u8) -> (yes: bool) =
+--  Whether `value` has an `instead` line of `root` for `place`.
+stands_in: (value: lock.lock, root: []u8, place: []u8) -> (yes: bool) =
     yes = false
     for other in vec.used(value.instead) do
-        if strings.same(other.place, place) then yes = true end if
+        if strings.same(other.place, place) and strings.same(other.root, root) then
+            yes = true
+        end if
     end for
 end stands_in
 
@@ -554,17 +708,14 @@ node_named: (st: state, name: []u8) -> (index: usize) ! unknown =
     fail unknown
 end node_named
 
---  Mark the packages the one being built reaches, through the nodes that
---  were taken, as live, and as needed those something `needs`.
+--  Mark the packages that `wants`, of the description in `base`, reach
+--  through the nodes that were taken as live.
 reached: (host: blocking.host, memory: lifetime.memory, inout st: state,
-          project: []u8, about: description.description)
+          base: []u8, wants: []description.requirement)
          -> none ! report.refused =
     mut work := vec.new(item: usize)
-    for want in vec.used(about.needs) do
-        try marked(host, memory, st, work, project, want, true)
-    end for
-    for want in vec.used(about.uses) do
-        try marked(host, memory, st, work, project, want, false)
+    for want in wants do
+        try marked(host, memory, st, work, base, want, true)
     end for
     mut at: usize = 0
     while at < vec.length(work) do
@@ -622,8 +773,8 @@ end anew
 --  from the lock's line when it serves and else from the repository, see
 --  that the store holds what the commit holds, and read its description.
 materialised: (escaping host: blocking.host, memory: lifetime.memory,
-               parent: lifetime.parent, inout st: state, next: ask)
-              -> (found: node) ! report.refused =
+               parent: lifetime.parent, inout st: state, next: ask,
+               as_tool: bool) -> (found: node) ! report.refused =
     --  Copies, so that nothing here looks into the state while it changes.
     place: []u8 = try glued(host, memory, [next.want.place])
     asker: []u8 = try glued(host, memory, [next.asker])
@@ -631,11 +782,20 @@ materialised: (escaping host: blocking.host, memory: lifetime.memory,
     mut commit: []u8 = try glued(host, memory, [next.want.commit])
     mut expect: []u8 = ""
     mut hinted: bool = true
-    line_at: usize = lock.placed(st.old, place) else (problem)
-        _ = problem
-        hinted = false
-        0
-    end
+    mut line_at: usize = 0
+    if as_tool then
+        line_at = lock.tool_placed(st.old, place) else (problem)
+            _ = problem
+            hinted = false
+            0
+        end
+    else
+        line_at = lock.placed(st.old, st.root, place) else (problem)
+            _ = problem
+            hinted = false
+            0
+        end
+    end if
     if hinted then
         lines: []lock.line = vec.used(st.old.lines)
         line: lock.line = lines[line_at]
@@ -904,29 +1064,33 @@ must: (host: blocking.host, memory: lifetime.memory, inout st: state,
 end must
 
 --  Say what the new lock changes: a line for each package that is new,
---  that changed, or that is gone, with its version, where it is from, how
---  large it is and its licence.
+--  that changed, or that is gone, with whose it is, its version, where it
+--  is from, how large it is and its licence.
 summary: (host: blocking.host, memory: lifetime.memory, st: state,
           fresh: lock.lock) -> none ! report.refused =
     for line in vec.used(fresh.lines) do
         mut what: []u8 = "added"
-        mut before: bool = true
-        at_old: usize = lock.named(st.old, line.name) else (problem)
-            _ = problem
-            before = false
-            0
-        end
+        mut was_commit: []u8 = ""
+        mut was_place: []u8 = ""
+        mut before: bool = false
+        for was in vec.used(st.old.lines) do
+            if was.tool == line.tool and strings.same(was.root, line.root)
+              and strings.same(was.name, line.name) then
+                before = true
+                was_commit = was.commit
+                was_place = was.place
+            end if
+        end for
         if before then
-            olds: []lock.line = vec.used(st.old.lines)
-            was: lock.line = olds[at_old]
-            continue when strings.same(was.commit, line.commit)
-              and strings.same(was.place, line.place)
+            continue when strings.same(was_commit, line.commit)
+              and strings.same(was_place, line.place)
             what = "changed"
         end if
         mut path: []u8 = ""
         mut licence: []u8 = ""
-        for item in vec.used(st.nodes) do
-            if strings.same(item.name, line.name) then
+        for item in vec.used(st.facts) do
+            if item.tool == line.tool and strings.same(item.root, line.root)
+              and strings.same(item.name, line.name) then
                 path = item.path
                 licence = item.licence
             end if
@@ -935,18 +1099,35 @@ summary: (host: blocking.host, memory: lifetime.memory, st: state,
         version: []u8 = if lenof line.version > 0 then line.version
                         else line.commit end if
         size: u64 = try size_of(host, memory, path)
-        said(host, [what, " ", line.name, " ", version, " from ", line.place,
-                    ", ", try number(host, memory, (size + 1023) / 1024),
+        said(host, [what, " ", try whose(host, memory, line), line.name, " ",
+                    version, " from ", line.place, ", ",
+                    try number(host, memory, (size + 1023) / 1024),
                     " KiB, ", licence, "\n"])
     end for
     for was in vec.used(st.old.lines) do
-        _ = lock.named(fresh, was.name) else (problem)
-            _ = problem
-            said(host, ["dropped ", was.name, "\n"])
-            0
-        end
+        mut still: bool = false
+        for line in vec.used(fresh.lines) do
+            if was.tool == line.tool and strings.same(was.root, line.root)
+              and strings.same(was.name, line.name) then
+                still = true
+            end if
+        end for
+        continue when still
+        said(host, ["dropped ", try whose(host, memory, was), was.name, "\n"])
     end for
 end summary
+
+--  Whose a lock's line is, as the summary says it before the name: a
+--  tool itself, a package of a tool, or, with no word, the program's.
+whose: (host: blocking.host, memory: lifetime.memory, line: lock.line)
+       -> (words: []u8) ! report.refused =
+    words = ""
+    if line.tool then
+        words = "the tool "
+    elsif lenof line.root > 0 then
+        words = try glued(host, memory, ["for the tool ", line.root, ": "])
+    end if
+end whose
 
 --  How many bytes the files under `path` hold.
 size_of: (host: blocking.host, memory: lifetime.memory, path: []u8)

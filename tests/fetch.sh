@@ -142,7 +142,7 @@ if fetched "a chain of three" chain; then
         "$scratch/chain/landin.lock"
     holds "beta's bare tag is a version" \
         '^package t/beta example\.test/beta 1\.0\.0 commit ' "$scratch/chain/landin.lock"
-    holds "the lock names its form first" '^lock 1$' "$scratch/chain/landin.lock"
+    holds "the lock names its form first" '^lock 2$' "$scratch/chain/landin.lock"
     run=$((run + 1))
     if [ "$(wc -l < "$scratch/chain/landin.lock")" -ne 4 ]; then
         cat "$scratch/chain/landin.lock"
@@ -163,7 +163,7 @@ if fetched "a chain of three" chain; then
         fi
     fi
     fetched "--check of a lock that serves" chain --check || true
-    holds "--check says the lock serves" '^landin\.lock gives what landin\.package asks for: 3 packages$' "$scratch/said"
+    holds "--check says the lock serves" '^landin\.lock gives what landin\.package asks for: 3 packages for the program$' "$scratch/said"
     #  The lock on a machine whose store is empty: the commits it names are
     #  fetched, and it does not change.
     mkdir "$scratch/elsewhere"
@@ -525,6 +525,123 @@ step app: kept" ]; then
         built "a build after the program changed" tooled || true
         holds "a change to the package keeps the tool" '^tool t/gen: kept$' "$scratch/said"
         holds "a change to the package runs its step" '^step app$' "$scratch/said"
+    fi
+fi
+#  A tool is a program of its own: its packages are chosen apart.  mul3
+#  needs alpha 2.0.0 and writes a module that gives ten times what alpha
+#  gives it, 30; mul2 needs alpha 1.2.0 and writes 20.  The program needs
+#  alpha 1.0.0, a breaking change away from mul3's, and adds what alpha
+#  gives it, 1.
+#  multiplier NAME ALPHA: a tool `NAME`, in the repository NAME, that needs
+#  alpha at the version ALPHA.
+multiplier() {
+    repo "$1"
+    mkdir -p "$scratch/repos/$1/cmd/$1"
+    printf 'package t/%s\nkind program\nprogram %s cmd/%s\nneeds example.test/alpha %s\n' \
+        "$1" "$1" "$1" "$2" > "$scratch/repos/$1/landin.package"
+    sed '/^import core\/io$/i import t/alpha/part' "$scratch/repos/gen/cmd/gen/main.ldn" \
+        | sed 's/"public value: () -> (n: i32) =\\n    n = 30\\nend value\\n"/texts[usize(part.value())]/' \
+        > "$scratch/repos/$1/cmd/$1/main.ldn"
+    cat >> "$scratch/repos/$1/cmd/$1/main.ldn" <<'END'
+
+texts: [4][]u8 = ["public value: () -> (n: i32) =\n    n = 0\nend value\n",
+                  "public value: () -> (n: i32) =\n    n = 10\nend value\n",
+                  "public value: () -> (n: i32) =\n    n = 20\nend value\n",
+                  "public value: () -> (n: i32) =\n    n = 30\nend value\n"]
+END
+    release "$1" v1.0.0
+}
+multiplier mul3 2.0.0
+multiplier mul2 1.2.0
+program apart "test/apart/three;test/apart/two;t/alpha/part" "three.value() + two.value() + part.value()" \
+    "needs example.test/alpha 1.0.0" "uses example.test/mul3 1.0.0" "uses example.test/mul2 1.0.0"
+cat > "$scratch/apart/landin.recipe" <<'END'
+step made3
+    run mul3 {out}/test {out}/test/apart {out}/test/apart/three {out}/test/apart/three/three.ldn
+step made2
+    run mul2 {out}/test {out}/test/apart {out}/test/apart/two {out}/test/apart/two/two.ldn
+step app with packages made3 made2
+    run refine compile --root packages --root made3 --root made2 packages/test/apart/cmd/app -o {out}/app
+END
+if fetched "a program and two tools, each with its own alpha" apart; then
+    holds "the summary says whose a tool's package is" \
+        '^added for the tool t/mul3: t/alpha 2\.0\.0 from example\.test/alpha, [0-9]+ KiB, MIT$' "$scratch/said"
+    holds "the summary names a tool as one" '^added the tool t/mul3 1\.0\.0 from example\.test/mul3' "$scratch/said"
+    holds "the program's alpha is its own" '^package t/alpha example\.test/alpha 1\.0\.0 ' "$scratch/apart/landin.lock"
+    holds "a tool's alpha is another major" '^for t/mul3 package t/alpha example\.test/alpha 2\.0\.0 ' "$scratch/apart/landin.lock"
+    holds "the other tool's alpha is its own too" '^for t/mul2 package t/alpha example\.test/alpha 1\.2\.0 ' "$scratch/apart/landin.lock"
+    run=$((run + 1))
+    if [ "$(cut -d' ' -f1-3 "$scratch/apart/landin.lock")" != "lock 2
+package t/alpha example.test/alpha
+tool t/mul2 example.test/mul2
+for t/mul2 package
+tool t/mul3 example.test/mul3
+for t/mul3 package" ]; then
+        cat "$scratch/apart/landin.lock"
+        echo "FAILED fetch: the lock's lines are not the program's and then each tool's"
+        failed=$((failed + 1))
+    fi
+    cp "$scratch/apart/landin.lock" "$scratch/apart.lock"
+    if fetched "a second fetch with tools" apart; then
+        run=$((run + 1))
+        if ! cmp -s "$scratch/apart.lock" "$scratch/apart/landin.lock"; then
+            echo "FAILED fetch: a lock with tools that was right was written again"
+            failed=$((failed + 1))
+        fi
+    fi
+    fetched "--check with tools" apart --check || true
+    holds "--check counts the program's packages" 'asks for: 1 packages for the program$' "$scratch/said"
+    holds "--check names each tool and its packages" '^the tool t/mul3: 1 packages of its own$' "$scratch/said"
+    if built "a program and tools with different versions of one package" apart; then
+        ends "each has its own alpha: 30 and 20 from the tools, 1 for the program" \
+            "$scratch/apart/.landin/out/app/app" 51
+        run=$((run + 1))
+        if [ -e "$scratch/apart/.landin/tools/t/mul3/packages/t/alpha/landin.package" ] \
+            && [ "$(find "$scratch/apart/.landin/packages/t" -mindepth 1 -maxdepth 1 | wc -l)" -eq 1 ] \
+            && ! cmp -s "$scratch/apart/.landin/packages/t/alpha/part/part.ldn" \
+                "$scratch/apart/.landin/tools/t/mul3/packages/t/alpha/part/part.ldn"; then
+            :
+        else
+            echo "FAILED build: the program's packages and a tool's are not held apart"
+            failed=$((failed + 1))
+        fi
+        built "a second build with two tools" apart || true
+        holds "a second build keeps a tool" '^tool t/mul3: kept$' "$scratch/said"
+        holds "a second build keeps the program's step" '^step app: kept$' "$scratch/said"
+    fi
+    #  A lock of the form before tools were chosen apart is not misread.
+    mkdir "$scratch/earlier"
+    cp -R "$scratch/apart/cmd" "$scratch/apart/landin.package" "$scratch/apart/landin.recipe" "$scratch/earlier/"
+    cp -R "$scratch/store-apart" "$scratch/store-earlier"
+    { echo "lock 1"; grep -E '^(package|tool) ' "$scratch/apart.lock"; } > "$scratch/earlier/landin.lock"
+    unbuilt "a build with a lock of the earlier form" earlier RB0204
+    holds "the refusal of an earlier lock says what to run" 'lock 1.*run `refine fetch`' "$scratch/said"
+    refused "--check of a lock of the earlier form" earlier RB0204 --check
+    if fetched "a fetch over a lock of the earlier form" earlier; then
+        holds "a note says the lock is written anew" '^note: landin\.lock is of the form `lock 1`' "$scratch/said"
+        run=$((run + 1))
+        if ! cmp -s "$scratch/apart.lock" "$scratch/earlier/landin.lock"; then
+            echo "FAILED fetch: a lock of the earlier form was not written anew as it has to be"
+            failed=$((failed + 1))
+        fi
+    fi
+fi
+#  A tool is taken as it declares: what the program names does not reach
+#  into it.  The program names the fork of alpha; mul2 still gets alpha.
+program unswayed "test/unswayed/two;t/alpha/part" "two.value() + part.value()" \
+    "needs example.test/fork 1.5.0" "uses example.test/mul2 1.0.0"
+cat > "$scratch/unswayed/landin.recipe" <<'END'
+step made2
+    run mul2 {out}/test {out}/test/unswayed {out}/test/unswayed/two {out}/test/unswayed/two/two.ldn
+step app with packages made2
+    run refine compile --root packages --root made2 packages/test/unswayed/cmd/app -o {out}/app
+END
+if fetched "a program that names a fork and uses a tool" unswayed; then
+    holds "the tool's package is from where the tool says" \
+        '^for t/mul2 package t/alpha example\.test/alpha 1\.2\.0 ' "$scratch/unswayed/landin.lock"
+    lacks "nothing stands in among the tool's packages" '^for t/mul2 instead' "$scratch/unswayed/landin.lock"
+    if built "a program with a fork and a tool without it" unswayed; then
+        ends "the program has the fork's 7, the tool wrote 20" "$scratch/unswayed/.landin/out/app/app" 27
     fi
 fi
 #  A package that is used and gives no program.

@@ -334,7 +334,10 @@ public about: (which: code) -> (words: []u8) =
             asked for or across a breaking change from it, or another commit
             than the one named. The description changed after the lock was
             written. Run `refine-fetch`, which changes the lines that have
-            to change and no others.
+            to change and no others. A lock that starts with `lock 1` is
+            said to be stale too: it is from before a tool's packages were
+            chosen apart from the program's, and `refine-fetch` writes it
+            anew.
             """
         entry_missing: words = """
             The lock names a package whose content is not in the store, as

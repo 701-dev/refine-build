@@ -1,28 +1,43 @@
 -- The lock, `landin.lock`: which commit and which content each package of
--- a program is.  `refine-fetch` writes it, `refine-build` reads it, and it
--- is kept with the package's sources.
+-- a program is, and of each tool the program's package `uses`.
+-- `refine-fetch` writes it, `refine-build` reads it, and it is kept with
+-- the package's sources.
 --
---     lock 1
+--     lock 2
 --     package  OWNER/NAME  LOCATION  2.3.1     commit HEX40  tree HEX64
---     tool     OWNER/NAME  LOCATION  untagged  commit HEX40  tree HEX64
 --     instead  LOCATION    OWNER/NAME
+--     tool     OWNER/NAME  LOCATION  untagged  commit HEX40  tree HEX64
+--     for TOOL package  OWNER/NAME  LOCATION  1.0.0  commit HEX40  tree HEX64
+--     for TOOL instead  LOCATION    OWNER/NAME
 --
--- `lock 1` names the form and is the first line.  Then comes one line for
--- each package that is fetched, in the order of their names compared byte
--- by byte: `tool` for one the package being built `uses` and nothing
--- `needs`, `package` for every other.  After the location is the version
--- whose tag gave the commit, or `untagged` when the commit was named
--- itself; `tree` is the content hash of what the commit holds, in the form
--- `hash/tree` describes, which is also the name of its entry in the store.
+-- `lock 2` names the form and is the first line.  A program and each tool
+-- are chosen apart: a tool is a program of its own, so it may hold another
+-- version of a package than the program does, and each holds a name once.
+--
+-- First come the program's lines: a `package` line for each package it
+-- holds that is fetched, in the order of their names compared byte by
+-- byte, and then its `instead` lines in the order of their locations.
+-- Then, for each tool in the order of their names, the `tool` line when
+-- the tool itself is fetched, and the tool's own packages and `instead`
+-- lines in the same order, each after `for` and the tool's OWNER/NAME.
+--
+-- After a location is the version whose tag gave the commit, or
+-- `untagged` when the commit was named itself; `tree` is the content hash
+-- of what the commit holds, in the form `hash/tree` describes, which is
+-- also the name of its entry in the store.
 --
 -- An `instead` line says that a location some package asks for is not
 -- fetched, because a package of the name it holds comes from elsewhere:
--- from the location the package being built names, or from a local path.
--- These lines follow the others, in the order of their locations.
+-- from the location the program's package (or, after `for`, the tool)
+-- names itself, or from a local path.
 --
 -- A package from a local path has no line: it is the copy that is there.
 -- The writer gives the same bytes for the same lines, one space between
 -- the words, so a lock that need not change does not.
+--
+-- `lock 1` was the form before tools were chosen apart.  `refine-build`
+-- refuses it; `refine-fetch` reads its lines as the program's and writes
+-- the lock anew.
 
 import core/cmp
 import core/mem
@@ -39,10 +54,13 @@ import dev701/refine_build/text/strings
 --- The word in a version's place when a commit was named itself.
 public untagged: []u8 = "untagged"
 
---- One fetched package.  `version` is empty for `untagged`; `commit` is
+--- One fetched package.  `root` is empty for the program's lines and for
+--- a tool's own line, which has `tool`, and the tool's OWNER/NAME for a
+--- package of a tool.  `version` is empty for `untagged`; `commit` is
 --- forty hexadecimal digits and `tree` sixty-four.
 public line: type = struct
     tool: bool
+    root: []u8
     name: []u8
     place: []u8
     version: []u8
@@ -51,8 +69,10 @@ public line: type = struct
 end line
 
 --- A location that is not fetched, and the name of the package that
---- stands in for what it holds.
+--- stands in for what it holds, among the program's packages when `root`
+--- is empty and else among those of the tool `root` names.
 public stand_in: type = struct
+    root: []u8
     place: []u8
     name: []u8
 end stand_in
@@ -73,53 +93,82 @@ end empty
 
 --- Read the lock in `source`, which is the content of `file`.  Everything
 --- wrong in it is said, each with its line, and then the read fails
---- `report.refused`.
+--- `report.refused`.  A lock of the form before this one is read, its
+--- lines as the program's, when `earlier` says so, and is refused, with
+--- what to run, when not.
 public read: (host: blocking.host, memory: lifetime.memory, file: []u8,
-              source: []u8) -> (result: lock)
+              source: []u8, earlier: bool) -> (result: lock)
              ! report.refused | mem.out_of_memory =
     result = empty()
     doc := try lines.read(memory, source)
     mut wrong: bool = false
     mut formed: bool = false
+    mut old_form: bool = false
     for item, at in vec.used(doc.lines) do
         if at == 0 then
             words: [][]u8 = vec.used(item.words)
             if item.state == lines.sound and lenof words == 2
-              and strings.same(words[0], "lock")
-              and strings.same(words[1], "1") then
-                formed = true
-                continue
+              and strings.same(words[0], "lock") then
+                if strings.same(words[1], "2") then
+                    formed = true
+                    continue
+                end if
+                if strings.same(words[1], "1") then
+                    formed = true
+                    old_form = true
+                    if not earlier then
+                        report.at_line(host, codes.lock_stale, file, 1,
+                                       ["this is a lock of the form `lock 1`, from before a tool's packages were chosen apart from the program's; run `refine fetch`, the program `refine-fetch`, in the package's directory, which writes it anew"])
+                        fail report.refused
+                    end if
+                    continue
+                end if
             end if
         end if
-        read_line(host, memory, file, item, result) else (problem)
+        read_line(host, memory, file, item, old_form, result) else (problem)
             fail mem.out_of_memory when problem == mem.out_of_memory
             wrong = true
         end
     end for
     if not formed then
         report.at_line(host, codes.line_missing, file, 0,
-                       ["the first line is not `lock 1`, so this is no lock this tool reads; `refine-fetch` writes one, and `refine-fetch --update` writes it anew"])
+                       ["the first line is not `lock 2`, so this is no lock this tool reads; `refine-fetch` writes one, and `refine-fetch --update` writes it anew"])
         wrong = true
     end if
     fail report.refused when wrong
 end read
 
+--- Whether `source` is a lock of the form before this one.
+public is_earlier: (source: []u8) -> (yes: bool) =
+    yes = strings.starts(source, "lock 1\n") or strings.same(source, "lock 1")
+end is_earlier
+
 read_line: (host: blocking.host, memory: lifetime.memory, file: []u8,
-            escaping item: lines.line, inout into: lock)
+            escaping item: lines.line, old_form: bool, inout into: lock)
            -> none ! report.refused | mem.out_of_memory =
     if item.state <> lines.sound then
         report.at_line(host, codes.line_unreadable, file, item.number,
                        [lines.words_of(item.state)])
         fail report.refused
     end if
-    words: [][]u8 = vec.used(item.words)
+    mut words: [][]u8 = vec.used(item.words)
+    mut root: []u8 = ""
+    if strings.same(words[0], "for") and not old_form then
+        try wants(host, file, item.number,
+                  lenof words >= 3 and is_name(words[1])
+                  and (strings.same(words[2], "package")
+                       or strings.same(words[2], "instead")),
+                  "`for` takes a tool's name and then a `package` or an `instead` line: `for OWNER/NAME package ...`. `refine-fetch` writes the lock; do not write it by hand")
+        root = words[1]
+        words = words[2..<lenof words]
+    end if
     keyword: []u8 = words[0]
     if strings.same(keyword, "instead") then
         try wants(host, file, item.number,
                   lenof words == 3 and description.is_location(words[1])
                   and is_name(words[2]),
                   "`instead` takes a location and a package's name: `instead LOCATION OWNER/NAME`")
-        other: stand_in = (place: words[1], name: words[2])
+        other: stand_in = (root: root, place: words[1], name: words[2])
         try vec.push(into.instead, memory, other)
         return
     end if
@@ -127,7 +176,7 @@ read_line: (host: blocking.host, memory: lifetime.memory, file: []u8,
       and not strings.same(keyword, "tool") then
         report.at_line(host, codes.keyword_unknown, file, item.number,
                        ["unknown keyword `", keyword,
-                        "`; a lock line starts with package, tool or instead. `refine-fetch` writes the lock; do not write it by hand"])
+                        "`; a lock line starts with package, tool, instead or for. `refine-fetch` writes the lock; do not write it by hand"])
         fail report.refused
     end if
     try wants(host, file, item.number,
@@ -139,17 +188,19 @@ read_line: (host: blocking.host, memory: lifetime.memory, file: []u8,
               and description.is_commit(words[5])
               and strings.same(words[6], "tree") and is_hash(words[7]),
               "a lock line is `package OWNER/NAME LOCATION VERSION commit HEX40 tree HEX64`, the version three numbers or `untagged`. `refine-fetch` writes the lock; do not write it by hand")
+    is_tool: bool = strings.same(keyword, "tool")
     for other in vec.used(into.lines) do
-        if strings.same(other.name, words[1]) then
+        if strings.same(other.name, words[1]) and other.tool == is_tool
+          and strings.same(other.root, root) then
             report.at_line(host, codes.said_twice, file, item.number,
                            ["`", words[1],
-                            "` has two lines; a program holds a package once. `refine-fetch --update` writes the lock anew"])
+                            "` has two lines; a program holds a package once, and so does a tool. `refine-fetch --update` writes the lock anew"])
             fail report.refused
         end if
     end for
     mut version: []u8 = words[3]
     if strings.same(version, untagged) then version = "" end if
-    fetched: line = (tool: strings.same(keyword, "tool"), name: words[1],
+    fetched: line = (tool: is_tool, root: root, name: words[1],
                      place: words[2], version: version, commit: words[5],
                      tree: words[7])
     try vec.push(into.lines, memory, fetched)
@@ -164,31 +215,95 @@ public written: (memory: lifetime.memory, inout value: lock)
     sort.sort_by(vec.used(value.lines), order, line_earlier)
     sort.sort_by(vec.used(value.instead), order, stand_in_earlier)
     mut whole := vec.new(item: u8)
-    try vec.append_bytes(whole, memory, "lock 1\n")
+    try vec.append_bytes(whole, memory, "lock 2\n")
+    --  The program's, then each tool's in the order of the tools' names:
+    --  a tool's group is named by the tool, whether or not the tool itself
+    --  has a line.
+    try group_written(memory, value, "", whole)
+    mut groups := vec.new(item: []u8)
     for item in vec.used(value.lines) do
-        keyword: []u8 = if item.tool then "tool" else "package" end if
-        version: []u8 = if lenof item.version > 0 then item.version
-                        else untagged end if
-        parts: [12][]u8 = [keyword, " ", item.name, " ", item.place, " ",
-                           version, " commit ", item.commit, " tree ",
-                           item.tree, "\n"]
-        for part in parts do
-            try vec.append_bytes(whole, memory, part)
-        end for
+        try group_noted(memory, groups, group_of(item))
     end for
     for item in vec.used(value.instead) do
+        try group_noted(memory, groups, item.root)
+    end for
+    sort.sort_by(vec.used(groups), order, name_earlier)
+    for group in vec.used(groups) do
+        try group_written(memory, value, group, whole)
+    end for
+    source = vec.used(whole)
+end written
+
+group_noted: (memory: lifetime.memory, inout groups: vec.list([]u8),
+              group: []u8) -> none ! mem.out_of_memory =
+    return when lenof group == 0
+    for other in vec.used(groups) do
+        return when strings.same(other, group)
+    end for
+    try vec.push(groups, memory, try strings.joined(memory, [group]))
+end group_noted
+
+name_earlier: (by: usize, left: []u8, right: []u8) -> (yes: bool) =
+    _ = by
+    yes = cmp.compare(left, right) == cmp.less
+end name_earlier
+
+--  The tool a line belongs with: itself for a tool's line, its root for a
+--  tool's package, nothing for the program's.
+group_of: (item: line) -> (group: []u8 from item) =
+    group = if item.tool then item.name else item.root end if
+end group_of
+
+--  Write the lines of one group: the program's when `group` is empty.
+group_written: (memory: lifetime.memory, value: lock, group: []u8,
+                inout whole: vec.list(u8)) -> none ! mem.out_of_memory =
+    for item in vec.used(value.lines) do
+        continue when not (item.tool and strings.same(item.name, group))
+        try line_written(memory, item, whole)
+    end for
+    for item in vec.used(value.lines) do
+        continue when item.tool or not strings.same(item.root, group)
+        try line_written(memory, item, whole)
+    end for
+    for item in vec.used(value.instead) do
+        continue when not strings.same(item.root, group)
+        if lenof group > 0 then
+            try vec.append_bytes(whole, memory, "for ")
+            try vec.append_bytes(whole, memory, group)
+            try vec.append_bytes(whole, memory, " ")
+        end if
         parts: [5][]u8 = ["instead ", item.place, " ", item.name, "\n"]
         for part in parts do
             try vec.append_bytes(whole, memory, part)
         end for
     end for
-    source = vec.used(whole)
-end written
+end group_written
 
---- The index of the line for the package fetched from `place`.
-public placed: (value: lock, place: []u8) -> (index: usize) ! absent =
+line_written: (memory: lifetime.memory, item: line,
+               inout whole: vec.list(u8)) -> none ! mem.out_of_memory =
+    if lenof item.root > 0 then
+        try vec.append_bytes(whole, memory, "for ")
+        try vec.append_bytes(whole, memory, item.root)
+        try vec.append_bytes(whole, memory, " ")
+    end if
+    keyword: []u8 = if item.tool then "tool" else "package" end if
+    version: []u8 = if lenof item.version > 0 then item.version
+                    else untagged end if
+    parts: [12][]u8 = [keyword, " ", item.name, " ", item.place, " ",
+                       version, " commit ", item.commit, " tree ",
+                       item.tree, "\n"]
+    for part in parts do
+        try vec.append_bytes(whole, memory, part)
+    end for
+end line_written
+
+--- The index of the line for the package of `root` fetched from `place`:
+--- the program's when `root` is empty, else the tool's that `root` names.
+public placed: (value: lock, root: []u8, place: []u8)
+               -> (index: usize) ! absent =
     for item, at in vec.used(value.lines) do
-        if strings.same(item.place, place) then
+        if not item.tool and strings.same(item.root, root)
+          and strings.same(item.place, place) then
             index = at
             return
         end if
@@ -196,10 +311,12 @@ public placed: (value: lock, place: []u8) -> (index: usize) ! absent =
     fail absent
 end placed
 
---- The index of the line for the package called `name`.
-public named: (value: lock, name: []u8) -> (index: usize) ! absent =
+--- The index of the line for the package of `root` called `name`.
+public named: (value: lock, root: []u8, name: []u8)
+              -> (index: usize) ! absent =
     for item, at in vec.used(value.lines) do
-        if strings.same(item.name, name) then
+        if not item.tool and strings.same(item.root, root)
+          and strings.same(item.name, name) then
             index = at
             return
         end if
@@ -207,11 +324,31 @@ public named: (value: lock, name: []u8) -> (index: usize) ! absent =
     fail absent
 end named
 
---- The name of the package that stands in for what `place` holds.
-public stood_in: (value: lock, place: []u8) -> (name: []u8 from value)
-                 ! absent =
+--- The index of the line for the tool fetched from `place`.
+public tool_placed: (value: lock, place: []u8) -> (index: usize) ! absent =
+    for item, at in vec.used(value.lines) do
+        if item.tool and strings.same(item.place, place) then
+            index = at
+            return
+        end if
+    end for
+    fail absent
+end tool_placed
+
+--- Whether any line, a tool's or a package's of any root, is for `name`.
+public mentions: (value: lock, name: []u8) -> (yes: bool) =
+    yes = false
+    for item in vec.used(value.lines) do
+        if strings.same(item.name, name) then yes = true end if
+    end for
+end mentions
+
+--- The name of the package that stands in for what `place` holds among
+--- the packages of `root`.
+public stood_in: (value: lock, root: []u8, place: []u8)
+                 -> (name: []u8 from value) ! absent =
     for item in vec.used(value.instead) do
-        if strings.same(item.place, place) then
+        if strings.same(item.root, root) and strings.same(item.place, place) then
             name = item.name
             return
         end if

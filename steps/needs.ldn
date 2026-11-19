@@ -1,8 +1,8 @@
 -- What a build takes from other packages.
 --
--- The packages the description `needs` and `uses` are those the lock
--- names, as the store holds them, and those in local paths (see
--- `packages`); nothing here fetches.  `.landin/packages` is made anew for
+-- The packages the description `needs` are those the lock names, as the
+-- store holds them, and those in local paths (see `packages`); nothing
+-- here fetches.  `.landin/packages` is made anew for
 -- every build: this package under its OWNER/NAME, a link to the project,
 -- and every other under its own, a link to its entry in the store or to
 -- its local directory.  That directory is what the input `packages` is.
@@ -13,15 +13,19 @@
 -- A package the description `uses` is a tool: the programs its
 -- description names are compiled here, with the refine a `run refine`
 -- line means, into one entry of the store, and a `run` line names one by
--- its first word.  Only the tools of the package being built are made,
--- and a tool's own `uses` are not.  The entry is kept under the SHA-256
+-- its first word.  A tool is a program of its own: it is compiled against
+-- a `packages` directory of its own, `.landin/tools/OWNER/NAME/packages`,
+-- that holds the tool and the packages the lock's `for` lines name for
+-- it, and none of the program's; its imports are checked there too.  Only
+-- the tools of the package being built are made, and a tool's own `uses`
+-- are not.  The entry is kept under the SHA-256
 -- of this byte string, in fields as a step's key has them (see
 -- `keys.ldn` here):
 --
 --     the 14 bytes `landin-tool-1` and a line feed
 --     `p`   what refine is, as in a step's key
---     `a`   for the tool and each package it needs, directly or through
---           another, in the order of their names: OWNER/NAME, a space and
+--     `a`   for the tool and each package it is built with, in the order
+--           of their names: OWNER/NAME, a space and
 --           the 64 hexadecimal digits of its tree hash
 --     `w`   for each program, in the description's order: its name, and
 --           then the module it starts in
@@ -68,6 +72,7 @@ gathered: (host: blocking.host, lasting: lifetime.memory,
     memory := region.over(ledger, parent)
     defer region.release(ledger, parent)
     mut found: packages.set = packages.none_needed()
+    mut locks: lock.lock = lock.empty()
     if vec.length(about.needs) + vec.length(about.uses) > 0 then
         source: []u8 = files.read_all(host, memory, asked.lock_file)
             else (problem)
@@ -80,7 +85,7 @@ gathered: (host: blocking.host, lasting: lifetime.memory,
             end if
             fail report.refused
         end
-        locks: lock.lock = lock.read(host, memory, asked.lock_file, source)
+        locks = lock.read(host, memory, asked.lock_file, source, false)
             else (problem)
             command.said(host, problem)
             fail report.refused
@@ -123,22 +128,30 @@ gathered: (host: blocking.host, lasting: lifetime.memory,
         others = try glued(host, memory, [others, line])
     end for
     common.others = try glued(host, lasting, [others])
-    try packages.imports_checked(host, parent, found, common.project, own)
-    for index in vec.used(found.uses) do
-        try tool_made(host, lasting, parent, asked, common, found, index)
+    try packages.imports_checked(host, parent, found, common.project,
+                                 common.project, own)
+    for want in vec.used(about.uses) do
+        made_of: packages.tooling =
+            try packages.tool_locked(host, memory, parent, common.kept_in,
+                                     common.project, asked.lock_file, want,
+                                     locks)
+        try packages.imports_checked(host, parent, made_of.beside, "",
+                                     made_of.itself.path,
+                                     made_of.itself.name)
+        try tool_made(host, lasting, parent, asked, common, made_of)
     end for
 end gathered
 
---  Make the programs of the tool at `index` of `found`, or take what the
---  store keeps of them, and note them in `common`.
+--  Make the programs of the tool `made_of`, or take what the store
+--  keeps of them, and note them in `common`.
 tool_made: (host: blocking.host, lasting: lifetime.memory,
             parent: lifetime.parent, asked: request, inout common: shared,
-            found: packages.set, index: usize) -> none ! report.refused =
+            made_of: packages.tooling) -> none ! report.refused =
     mut ledger: lifetime.ledger = zeroed
     memory := region.over(ledger, parent)
     defer region.release(ledger, parent)
-    all: []packages.package = vec.used(found.all)
-    item: packages.package = all[index]
+    all: []packages.package = vec.used(made_of.beside.all)
+    item: packages.package = made_of.itself
     programs: []description.program = vec.used(item.about.programs)
     if lenof programs == 0 then
         report.say(host, codes.tool_wrong,
@@ -160,32 +173,15 @@ tool_made: (host: blocking.host, lasting: lifetime.memory,
     mut running := sha256.start()
     sha256.add(running, tool_form)
     field(running, u8('p'), common.refine_is)
-    --  The tool and what it needs, directly or through another.
-    mut marks := vec.new(item: bool)
-    for other in all do
-        _ = other
-        vec.push(marks, memory, false) else (problem)
-            gave_up(host, item.name, problem)
-            fail report.refused
-        end
-    end for
-    mut work := vec.new(item: usize)
-    try reached(host, memory, marks, work, index)
-    mut at: usize = 0
-    while at < vec.length(work) do
-        next: usize = vec.get(work, at) else (problem)
-            gave_up(host, item.name, problem)
-            fail report.refused
-        end
-        for needed in vec.used(all[next].needs) do
-            try reached(host, memory, marks, work, needed)
-        end for
-        inc at
-    end while
+    --  The tool and every package it is built with.
     mut lines := vec.new(item: []u8)
-    for next in vec.used(work) do
-        line: []u8 = try glued(host, memory,
-                               [all[next].name, " ", all[next].tree])
+    own_line: []u8 = try glued(host, memory, [item.name, " ", item.tree])
+    vec.push(lines, memory, own_line) else (problem)
+        gave_up(host, item.name, problem)
+        fail report.refused
+    end
+    for other in all do
+        line: []u8 = try glued(host, memory, [other.name, " ", other.tree])
         vec.push(lines, memory, line) else (problem)
             gave_up(host, item.name, problem)
             fail report.refused
@@ -221,8 +217,22 @@ tool_made: (host: blocking.host, lasting: lifetime.memory,
             fail report.refused
         end
         try made(host, view)
-        try linked(host, try glued(host, memory, [common.work, "/packages"]),
-                   try glued(host, memory, [view, "/packages"]))
+        --  The tool's own `packages`: itself and what it is built with.
+        held_in: []u8 = try glued(host, memory, [home, "/packages"])
+        cut: usize = strings.find(item.name, u8('/'))
+        try made(host, try glued(host, memory,
+                                 [held_in, "/", item.name[0..<cut]]))
+        try linked(host, item.path,
+                   try glued(host, memory, [held_in, "/", item.name]))
+        for other in all do
+            other_cut: usize = strings.find(other.name, u8('/'))
+            try made(host, try glued(host, memory,
+                                     [held_in, "/",
+                                      other.name[0..<other_cut]]))
+            try linked(host, other.path,
+                       try glued(host, memory, [held_in, "/", other.name]))
+        end for
+        try linked(host, held_in, try glued(host, memory, [view, "/packages"]))
         out: []u8 = try store.fresh(host, memory, common.kept_in)
         names: forms = (raw: true, spelled: ["", "", "", ""])
         mut heard := vec.new(item: store.piece)
@@ -260,19 +270,3 @@ tool_made: (host: blocking.host, lasting: lifetime.memory,
         end
     end for
 end tool_made
-
---  Mark the package at `index` and put it in the work, unless it is.
-reached: (host: blocking.host, memory: lifetime.memory,
-          inout marks: vec.list(bool), inout work: vec.list(usize),
-          index: usize) -> none ! report.refused =
-    slot: ptr mut bool = vec.at(marks, index) else (problem)
-        gave_up(host, "the packages", problem)
-        fail report.refused
-    end
-    return when slot.val
-    slot.val = true
-    vec.push(work, memory, index) else (problem)
-        gave_up(host, "the packages", problem)
-        fail report.refused
-    end
-end reached

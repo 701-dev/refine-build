@@ -123,7 +123,15 @@ and dropped, each with its version, location, size and licence.
   stands in for the original.
 - **Local paths** are for the package being built and its local packages.
   They have no line in the lock; what they need has.
-- **Tools.** A `uses` line is fetched like a `needs` line.
+- **Tools are chosen apart.** A package the description `uses` is a
+  program of its own. What it needs is chosen among its own packages
+  only, by the rules above with the tool in the place of the package being
+  built, as if `refine-fetch` ran in the tool's directory with no lock
+  there. So a tool may hold another version of a package than the program
+  does, even another major, and two tools may differ too. Nothing chosen
+  for the program reaches a tool: a fork the program names does not stand
+  in among a tool's packages. To change what a tool is built from, use a
+  fork of the tool.
 
 ## Building with other packages
 
@@ -133,8 +141,8 @@ its local path. Without a lock, with one that does not give what the
 description asks for, or with a store that lacks what the lock names, it
 refuses and says to run `refine fetch`.
 
-- **`packages`**, the input, then holds this package and every other one,
-  each at its `owner/name`: a link to the project, to an entry of the
+- **`packages`**, the input, then holds this package and every package
+  the program needs, each at its `owner/name`: a link to the project, to an entry of the
   store, or to a local directory. A step's key covers each one's content,
   so an edit to a local package runs the steps that take `packages`.
 - **Imports are held to the description.** Before any step runs, every
@@ -150,9 +158,12 @@ refuses and says to run `refine fetch`.
 - **Tools.** For each package the description `uses`, the programs its
   description names are compiled, with the refine that `run refine` means,
   into one entry of the store, and a `run` line names one by its first
-  word. The tool is made again when it, a package it needs or refine
-  changed, and not when the package being built did. Only the tools of the
-  package being built are made; a tool's own `uses` are not.
+  word. A tool is compiled against a `packages` of its own, which holds
+  the tool and the packages the lock names for it and none of the
+  program's, and its imports are held to its description there. The tool
+  is made again when it, a package it is built with or refine changed, and
+  not when the package being built did. Only the tools of the package
+  being built are made; a tool's own `uses` are not.
 
 A recipe that makes a module with a tool and compiles with it:
 
@@ -169,19 +180,27 @@ The module is written under the package's own `owner/name`, so
 ### The lock: `landin.lock`
 
 ```
-lock 1
+lock 2
 package  t/alpha  github.com/t/alpha  1.2.0     commit 9c1e...  tree 5b0a...
-tool     t/gen    github.com/t/gen    untagged  commit 77d2...  tree e913...
 instead  github.com/other/alpha  t/alpha
+tool     t/gen    github.com/t/gen    untagged  commit 77d2...  tree e913...
+for t/gen package  t/alpha  github.com/t/alpha  2.0.0  commit 41aa...  tree c07d...
 ```
 
-One line for each fetched package, in the order of their names: the name,
-the location, the version whose tag gave the commit or `untagged`, the
-commit, and the content hash of what the commit holds, which is also the
-name of its entry in the store. `tool` is a package that is only used.
-`instead` says that a location some package asks for is not fetched,
-because the name it holds comes from elsewhere. Keep the lock with the
-sources. `refine-fetch` writes it; do not write it by hand.
+- **The program's lines come first:** a `package` line for each fetched
+  package, in the order of their names, then its `instead` lines.
+- **Then each tool,** in the order of the tools' names: its `tool` line,
+  and after `for` and the tool's name the packages chosen for it, and its
+  own `instead` lines.
+- **A line** holds the name, the location, the version whose tag gave the
+  commit or `untagged`, the commit, and the content hash of what the
+  commit holds, which is also the name of its entry in the store.
+- **`instead`** says that a location some package asks for is not fetched,
+  because the name it holds comes from elsewhere.
+
+Keep the lock with the sources. `refine-fetch` writes it; do not write it
+by hand. A lock that starts with `lock 1` is from before tools were chosen
+apart: `refine-build` refuses it, and `refine-fetch` writes it anew.
 
 ### What `refine-fetch` trusts
 
@@ -424,9 +443,6 @@ process, as a watch mode will, without the memory in use growing.
   `--again` runs everything.
 - `packages` is the whole checkout and every other package, so an edit to
   any file of it, a README included, runs every step that takes `packages`.
-- Every package of a program is in one `packages`, a tool's among them, so
-  a package and a tool cannot need two versions of one name, though they
-  are different programs.
 - A tool's programs are found by their names, before PATH. Two tools with
   a program of one name are not told apart: the later `uses` line wins.
 - Only git is fetched from, over `https://`; a commit has to be on a
