@@ -1,6 +1,7 @@
 --again
 --check
 --help
+--raw
 --refine
 --store
 [exit 0]

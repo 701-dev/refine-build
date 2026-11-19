@@ -53,14 +53,16 @@ import dev701/refine_build/text/strings
 --- What a run is given besides the two files: the names they were read
 --- from, for what is said about them; the `refine` that `refine` in a
 --- `run` line means, empty for the one on PATH; the store's directory,
---- empty for the user's own; and whether every step runs again whatever
---- the store keeps.
+--- empty for the user's own; whether every step runs again whatever the
+--- store keeps; and whether what a program says is passed on as it is,
+--- its paths through the view left alone (see `said.ldn` here).
 public request: type = struct
     package_file: []u8
     recipe_file: []u8
     refine: []u8
     store: []u8
     again: bool
+    raw: bool
 end request
 
 --  What a step made, once it is done in this build.
@@ -229,6 +231,14 @@ run_step: (host: blocking.host, lasting: lifetime.memory,
         "no"
     end, "yes")
     try learned(host, lasting, parent, common, taken, tool, first)
+    package: []u8 = try glued(host, memory,
+                              ["packages/", common.owner, "/", common.name])
+    names: forms = (raw: asked.raw,
+                    spelled: [try glued(host, memory, [view, "/", package]),
+                              try glued(host, memory,
+                                        [common.work, "/", package]),
+                              try glued(host, memory, ["./", package]),
+                              package])
     key: sha256.digest = try key_of(host, memory, parent, plan, common,
                                     results, taken, tool, vec.used(symbolic))
     result: []u8 = try glued(host, memory, [common.work, "/out/", taken.name])
@@ -239,7 +249,7 @@ run_step: (host: blocking.host, lasting: lifetime.memory,
     if not every_time and not asked.again then
         mut was_kept: bool = true
         nothing: sha256.digest = zeroed
-        had: sha256.digest = kept(host, memory, common, taken, key, result)
+        had: sha256.digest = kept(host, memory, common, names, taken, key, result)
             else (problem)
             fail report.refused when problem == report.refused
             was_kept = false
@@ -256,8 +266,8 @@ run_step: (host: blocking.host, lasting: lifetime.memory,
     out: []u8 = try store.fresh(host, memory, common.kept_in)
     words: vec.list([]u8) = try worded(host, memory, how, taken, out)
     mut heard := vec.new(item: store.piece)
-    ended_well: bool = started(host, memory, common, taken, view, tool,
-                               vec.used(words), heard) else (problem)
+    ended_well: bool = started(host, memory, common, names, taken, view,
+                               tool, vec.used(words), heard) else (problem)
         _ = problem
         files.remove_all(host, memory, out) else none
         fail report.refused
@@ -284,19 +294,23 @@ end run_step
 --  its program said then is said again, and `result` is made a link to
 --  the entry.
 kept: (host: blocking.host, memory: lifetime.memory, common: shared,
-       taken: recipe.step, key: sha256.digest, result: []u8)
+       names: forms, taken: recipe.step, key: sha256.digest, result: []u8)
       -> (sum: sha256.digest) ! report.refused | store.unknown =
     found: store.kept = try store.known(host, memory, common.kept_in, key)
     io.write(host, io.out(host), "step ") else none
     io.write(host, io.out(host), taken.name) else none
     io.write(host, io.out(host), ": kept\n") else none
+    mut out_line: line = zeroed
+    mut err_line: line = zeroed
     for item in vec.used(found.said) do
         if item.errors then
-            io.write(host, io.err(host), item.bytes) else none
+            relayed(host, names, true, err_line, item.bytes)
         else
-            io.write(host, io.out(host), item.bytes) else none
+            relayed(host, names, false, out_line, item.bytes)
         end if
     end for
+    rested(host, names, false, out_line)
+    rested(host, names, true, err_line)
     try linked(host,
                try store.entry_path(host, memory, common.kept_in,
                                     found.entry),
@@ -336,7 +350,7 @@ end forgotten
 --  written on as it comes and added to `heard`, the copies made in
 --  `memory`.  Whether it ended with code 0; when it did not, that is said.
 started: (host: blocking.host, memory: lifetime.memory, common: shared,
-          taken: recipe.step, view: []u8, tool: []u8, words: [][]u8,
+          names: forms, taken: recipe.step, view: []u8, tool: []u8, words: [][]u8,
           inout heard: vec.list(store.piece))
          -> (ended_well: bool) ! report.refused =
     ended_well = false
@@ -363,6 +377,8 @@ started: (host: blocking.host, memory: lifetime.memory, common: shared,
         fail report.refused
     end
     mut room: [16384]u8 = zeroed
+    mut out_line: line = zeroed
+    mut err_line: line = zeroed
     loop do
         got: io.child_read = io.read_child(host, child, room) else (problem)
             _ = problem
@@ -372,9 +388,9 @@ started: (host: blocking.host, memory: lifetime.memory, common: shared,
         continue when got.count == 0
         errors: bool = got.stream == io.child_errors
         if errors then
-            io.write(host, io.err(host), room[0..<got.count]) else none
+            relayed(host, names, true, err_line, room[0..<got.count])
         else
-            io.write(host, io.out(host), room[0..<got.count]) else none
+            relayed(host, names, false, out_line, room[0..<got.count])
         end if
         copy: []u8 = strings.keep(memory, room[0..<got.count]) else (problem)
             _ = io.wait(host, child) else none
@@ -388,13 +404,15 @@ started: (host: blocking.host, memory: lifetime.memory, common: shared,
             fail report.refused
         end
     end loop
-    ended: io.ending = io.wait(host, child) else (problem)
+    rested(host, names, false, out_line)
+    rested(host, names, true, err_line)
+    ending: io.ending = io.wait(host, child) else (problem)
         report.say(host, codes.program_unstarted,
                    ["step `", taken.name, "`: lost `", words[0], "`: ",
                     failure.words(problem)])
         fail report.refused
     end
-    match ended.how
+    match ending.how
         io.exited(code): begin
             if code == 0 then
                 ended_well = true

@@ -1,8 +1,8 @@
 -- refine-build: runs a package's recipe.  It is a contributed command of
 -- `refine`, which runs a `refine-NAME` on PATH as `refine NAME`.
 --
---     refine-build [--refine PATH] [--store PATH] [--again] [--check]
---                  [STEP...]
+--     refine-build [--refine PATH] [--store PATH] [--again] [--raw]
+--                  [--check] [STEP...]
 --     refine-build explain [CODE]
 --     refine-build --describe
 --     refine-build --complete -- WORD...
@@ -13,7 +13,9 @@
 -- names none.  Each runs after the steps it takes inputs from.  What a
 -- step makes is kept in the user's store, or the one `--store` names, and a
 -- step whose program and inputs are what they were is not run but kept;
--- `--again` runs every step whatever the store keeps.
+-- `--again` runs every step whatever the store keeps.  What a step's
+-- program says is passed on with its paths through the view made the
+-- project's; `--raw` passes it on as it is.
 --
 -- The last three are what `refine` asks of a command it dispatches
 -- (Landin's D1385, D1387 and D1485): what a code means, what the command is
@@ -52,8 +54,8 @@ import dev701/refine_build/text/strings
 package_file: []u8 = "landin.package"
 recipe_file: []u8 = "landin.recipe"
 
-usage: []u8 = """usage: refine-build [--refine PATH] [--store PATH] [--again] [--check]
-                        [STEP...]
+usage: []u8 = """usage: refine-build [--refine PATH] [--store PATH] [--again] [--raw]
+                        [--check] [STEP...]
            refine-build explain [CODE]
 
     Run in a package's directory: reads landin.package and landin.recipe
@@ -67,6 +69,9 @@ usage: []u8 = """usage: refine-build [--refine PATH] [--store PATH] [--again] [-
                       $XDG_CACHE_HOME/landin/store, or else
                       $HOME/.cache/landin/store
       --again         run every step, whatever the store keeps
+      --raw           pass on what a step's program says as it is; without
+                      it, a path the program names through its view,
+                      packages/OWNER/NAME/..., is shown as the project's
       --check         read and check the two files, and run nothing
       -h, --help      print this and exit
 
@@ -91,6 +96,7 @@ options: type = struct
     refine: []u8
     store: []u8
     again: bool
+    raw: bool
     check_only: bool
     help: bool
     repeat: usize
@@ -177,7 +183,7 @@ build: (host: blocking.host, parent: lifetime.parent, asked: options)
     request: steps.request = (package_file: package_file,
                               recipe_file: recipe_file,
                               refine: asked.refine, store: asked.store,
-                              again: asked.again)
+                              again: asked.again, raw: asked.raw)
     try steps.fits(host, parent, request, plan)
     mut targets := vec.new(item: usize)
     for name in vec.used(asked.wanted) do
@@ -225,7 +231,7 @@ end build
 --  Read the command line.  What it gives lives as long as `memory`.
 arguments: (host: blocking.host, memory: lifetime.memory)
            -> (asked: options) ! report.refused | wrong_usage =
-    asked = (mode: building, refine: "", store: "", again: false,
+    asked = (mode: building, refine: "", store: "", again: false, raw: false,
              check_only: false, help: false,
              repeat: 1, wanted: vec.new(item: []u8), hash_file: "",
              hash_tree: "", chunk: 0, leave: vec.new(item: []u8))
@@ -253,6 +259,8 @@ arguments: (host: blocking.host, memory: lifetime.memory)
             asked.check_only = true
         elsif strings.same(word, "--again") then
             asked.again = true
+        elsif strings.same(word, "--raw") then
+            asked.raw = true
         elsif strings.same(word, "--store") then
             asked.store = try value(host, memory, at, count, word, "PATH")
             inc at
@@ -433,6 +441,7 @@ completed: (host: blocking.host, memory: lifetime.memory, given: [][]u8)
         offered(host, typed, "--again")
         offered(host, typed, "--check")
         offered(host, typed, "--help")
+        offered(host, typed, "--raw")
         offered(host, typed, "--refine")
         offered(host, typed, "--store")
         return

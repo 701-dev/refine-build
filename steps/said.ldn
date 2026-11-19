@@ -1,0 +1,128 @@
+-- Passing on what a step's program says.
+--
+-- A program runs in its view, so a path it names goes through the view:
+-- `packages/OWNER/NAME/cmd/build/main.ldn:10:34`.  A person wants the path
+-- they can open from the project's directory, where the tool is run:
+-- `cmd/build/main.ldn:10:34`.  So what a program says is passed on a line
+-- at a time, and in each line the ways the view names this package are
+-- taken out:
+--
+--     VIEW/packages/OWNER/NAME          the view's full path
+--     PROJECT/.landin/packages/OWNER/NAME
+--     ./packages/OWNER/NAME
+--     packages/OWNER/NAME
+--
+-- Only a whole path is changed: the form has to begin where no path
+-- character is before it and end at a `/` or where no path character
+-- follows, so `mypackages/OWNER/NAME` and `packages/OWNER/NAME_more` stay.
+-- The form and its `/` go; the package's directory alone becomes `.`.
+-- Paths into the library, into other packages and into a step's `{out}`
+-- stay as the program gave them.
+--
+-- The store keeps what the program said unchanged, so an entry does not
+-- depend on where a project is; the change is made on the way out, the
+-- same for a step that runs and for a kept step saying it again.
+--
+-- A line is passed on when its end comes, or when it is longer than the
+-- room here, and what is left when the program ends is passed on then.
+-- Each stream has a room of its own, on the stack of the routine that
+-- reads the program.
+
+import core/io
+import hosted/blocking
+import dev701/refine_build/text/strings
+
+--- The ways a view names the package, longest first where one begins
+--- another.
+forms: type = struct
+    raw: bool
+    spelled: [4][]u8
+end forms
+
+--- The part of a line a stream has given so far.
+line: type = struct
+    used: usize
+    held: [8192]u8
+end line
+
+--  Take `bytes` of a stream, and pass on each line that is whole now.
+relayed: (host: blocking.host, names: forms, errors: bool, inout pending: line,
+          bytes: []u8) -> none =
+    if names.raw then
+        put(host, errors, bytes)
+        return
+    end if
+    for byte in bytes do
+        pending.held[pending.used] = byte
+        inc pending.used
+        if byte == u8('\n') or pending.used == lenof pending.held then
+            passed(host, names, errors, pending.held[0..<pending.used])
+            pending.used = 0
+        end if
+    end for
+end relayed
+
+--  Pass on what a stream gave after its last line end.
+rested: (host: blocking.host, names: forms, errors: bool, inout pending: line)
+        -> none =
+    if pending.used > 0 then
+        passed(host, names, errors, pending.held[0..<pending.used])
+        pending.used = 0
+    end if
+end rested
+
+--  Write `whole` with every path through the view made the project's.
+passed: (host: blocking.host, names: forms, errors: bool, whole: []u8)
+        -> none =
+    mut start: usize = 0
+    mut at: usize = 0
+    while at < lenof whole do
+        mut length: usize = 0
+        if at == 0 or not in_path(whole[at - 1]) then
+            for form in names.spelled do
+                if length == 0 and lenof form > 0
+                  and strings.starts(whole[at..<lenof whole], form) then
+                    after: usize = at + lenof form
+                    if after == lenof whole or whole[after] == u8('/')
+                      or not in_path(whole[after]) then
+                        length = lenof form
+                    end if
+                end if
+            end for
+        end if
+        if length == 0 then
+            inc at
+        else
+            put(host, errors, whole[start..<at])
+            after: usize = at + length
+            if after + 1 < lenof whole and whole[after] == u8('/')
+              and in_path(whole[after + 1]) and whole[after + 1] <> u8('/') then
+                start = after + 1
+            else
+                put(host, errors, ".")
+                start = after
+            end if
+            at = start
+        end if
+    end while
+    put(host, errors, whole[start..<lenof whole])
+end passed
+
+--  Whether a byte can be part of a path as a program writes one.
+in_path: (byte: u8) -> (yes: bool) =
+    lower: bool = byte >= u8('a') and byte <= u8('z')
+    upper: bool = byte >= u8('A') and byte <= u8('Z')
+    digit: bool = byte >= u8('0') and byte <= u8('9')
+    yes = lower or upper or digit or byte == u8('_') or byte == u8('-')
+          or byte == u8('.') or byte == u8('/') or byte == u8('~')
+          or byte == u8('+') or byte >= 128
+end in_path
+
+put: (host: blocking.host, errors: bool, bytes: []u8) -> none =
+    return when lenof bytes == 0
+    if errors then
+        io.write(host, io.err(host), bytes) else none
+    else
+        io.write(host, io.out(host), bytes) else none
+    end if
+end put

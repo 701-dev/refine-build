@@ -32,6 +32,7 @@ refine-build --check         # read and check both files, run nothing
 refine-build --refine PATH   # which refine a `run refine ...` line means
 refine-build --store PATH    # which store keeps what the steps made
 refine-build --again         # run every step, whatever the store keeps
+refine-build --raw           # pass on what a step's program says as it is
 refine-build explain RB0102  # what a code means; `explain` alone lists them
 ```
 
@@ -116,6 +117,11 @@ default tool
 - `set always yes` under a step is the tool's own: the step runs on every
   build. A step that flashes a board or asks a clock wants it.
 - A step's program reads nothing from standard input.
+- What the program says is passed on a line at a time, and a path it names
+  through its view, `packages/owner/name/cmd/build/main.ldn:10:34`, is
+  shown as the project's, `cmd/build/main.ldn:10:34`, for a kept step too.
+  `--raw` passes everything on as the program said it. Paths into the
+  library and into a step's `{out}` stay as they are.
 
 In the project, everything the tool writes is under `.landin/`:
 
@@ -175,7 +181,7 @@ entries are read-only: `chmod -R u+w` it first.
 | `lifetime/` | How long memory lives: the regions of the process, one build and one step. |
 | `description/` | Reading and checking `landin.package`. |
 | `recipe/` | Reading and checking `landin.recipe`, placeholders, the steps' order. |
-| `steps/` | Views, a step's key, running its program and keeping or taking what the store has. |
+| `steps/` | Views, a step's key, running its program, passing on what it says, and keeping or taking what the store has. |
 | `store/` | The store: entries by content, keys, and the lock. |
 | `files/` | Whole files, directory trees, links, and finding a program on PATH. |
 | `hash/sha256/` | SHA-256, on the language alone, so that it can become a library. An integrity hash; it makes no constant-time claim. |
@@ -206,6 +212,11 @@ what it said, `always` and `--again` run, a failed step leaves no key and
 no entry, two builds at once leave one entry a step, entries are
 read-only, and a store of another form is refused. No test touches the
 user's store.
+
+Paths are checked with a program that names files through its view in
+every form, and with refine's own warning and error: the project's path
+shows on a first build and on a kept one, a path that only contains the
+view's is left alone, and `--raw` shows what was said.
 
 It then asks the tool to explain every code it lists, and holds that list
 to `codes/codes.ldn` and to the codes the cases expect. With a refine, it
@@ -255,6 +266,10 @@ process, as a watch mode will, without the memory in use growing.
 - Each step is started through `env -C`, which needs GNU coreutils. The
   Landin library cannot yet start a program in another directory.
 - Steps run one at a time.
+- A line of a program's output longer than 8,192 bytes is passed on in
+  pieces, and a path cut by a piece's end is not made the project's. What
+  a program writes without a line end shows when the line ends or the
+  program does.
 - A step's key does not cover everything a program can depend on, so the
   store keeps a step in these cases although it would make something else:
   - the assembler and the linker `refine` finds on PATH have changed;

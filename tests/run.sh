@@ -194,7 +194,7 @@ if [ -n "$refine" ]; then
         "  bld         Run the steps of a package's recipe ($tools/refine-bld)"
     ran "refine help bld did not run" "$refine" help bld
     holds "refine help bld is not the tool's own help" \
-        "usage: refine-build [--refine PATH] [--store PATH] [--again] [--check]"
+        "usage: refine-build [--refine PATH] [--store PATH] [--again] [--raw]"
     ran "refine explain RB0102 was not forwarded" "$refine" explain RB0102
     holds "the forwarded explanation is not announced as the tool's" \
         "RB0102 is explained by refine-bld at $tools/refine-bld, not by Landin"
@@ -583,6 +583,109 @@ if [ "$status" -ne 1 ] || ! grep -q '^error\[RB0602\]: ' "$scratch/out"; then
     stores=no
 fi
 [ "$stores" = ok ] || failed=$((failed + 1))
+#  Paths.  A step's program names files through its view; the tool shows
+#  them as the project's, live and when a kept step says them again, and
+#  only where the whole path is the view's.  --raw shows what was said.
+count=$((count + 1))
+paths=ok
+mkdir -p "$scratch/paths/notes"
+printf 'hello\n' > "$scratch/paths/notes/a.txt"
+printf 'package dev701/demo\nkind library\n' > "$scratch/paths/landin.package"
+cat > "$scratch/paths/say.sh" <<'SAY'
+echo "  --> packages/dev701/demo/notes/a.txt:1:2"
+echo "./packages/dev701/demo/x.ldn and $PWD/packages/dev701/demo/y.ldn"
+echo "mypackages/dev701/demo/z packages/dev701/demo_more/w packages/dev701/other/v"
+echo "in packages/dev701/demo: (packages/dev701/demo/)"
+echo "error packages/dev701/demo/e.ldn:3" >&2
+printf 'no end packages/dev701/demo/tail'
+SAY
+printf 'step says with packages say.sh\n    run sh say.sh\n' > "$scratch/paths/landin.recipe"
+shown="  --> notes/a.txt:1:2
+x.ldn and y.ldn
+mypackages/dev701/demo/z packages/dev701/demo_more/w packages/dev701/other/v
+in .: (./)
+no end tail"
+#  told WHAT FIRST ARGUMENTS...: a build in the paths project says FIRST,
+#  then `shown` or, with a last argument of `raw`, what the script wrote.
+told() {
+    what=$1 first=$2
+    shift 2
+    if ! (cd "$scratch/paths" && "$build" --store "$scratch/paths-store" "$@" \
+        > "$scratch/out" 2> "$scratch/err"); then
+        cat "$scratch/out" "$scratch/err"
+        echo "FAILED paths: $what: the build failed"
+        paths=no
+        return
+    fi
+    if [ "$(cat "$scratch/out")" != "$first
+$shown" ] || [ "$(cat "$scratch/err")" != "error e.ldn:3" ]; then
+        cat "$scratch/out" "$scratch/err"
+        echo "FAILED paths: $what"
+        paths=no
+    fi
+}
+told "a step's paths are not shown as the project's" "step says"
+told "a kept step's paths are not shown as the project's" "step says: kept"
+view=$scratch/paths/.landin/steps/says/view
+if ! (cd "$scratch/paths" && "$build" --store "$scratch/paths-store" --raw \
+    > "$scratch/out" 2> "$scratch/err") \
+    || [ "$(cat "$scratch/err")" != "error packages/dev701/demo/e.ldn:3" ] \
+    || ! grep -q -x -F "./packages/dev701/demo/x.ldn and $view/packages/dev701/demo/y.ldn" "$scratch/out" \
+    || ! grep -q -x -F "no end packages/dev701/demo/tail" "$scratch/out"; then
+    cat "$scratch/out" "$scratch/err"
+    echo "FAILED paths: --raw does not show what the program said"
+    paths=no
+fi
+if [ -n "$refine" ]; then
+    #  The same from refine itself: a warning, live and kept, and an error.
+    mkdir -p "$scratch/named/cmd/warns" "$scratch/named/cmd/wrong"
+    printf 'package dev701/named\nkind program\nprogram warns cmd/warns\n' \
+        > "$scratch/named/landin.package"
+    cat > "$scratch/named/cmd/warns/main.ldn" <<'LDN'
+public main: () -> (code: i32) =
+    mut zero: i32 = 0
+    code = zero
+end main
+LDN
+    cat > "$scratch/named/cmd/wrong/main.ldn" <<'LDN'
+public main: () -> (code: i32) =
+    code = nothing_of_that_name
+end main
+LDN
+    {
+        echo 'step warns with packages'
+        echo '    run refine check --root packages packages/dev701/named/cmd/warns'
+        echo 'step wrong with packages'
+        echo '    run refine check --root packages packages/dev701/named/cmd/wrong'
+        echo 'default warns'
+    } > "$scratch/named/landin.recipe"
+    for turn in first kept; do
+        if ! (cd "$scratch/named" && env -u LANDIN_REFINE "$build" \
+            --refine "$refine" --store "$scratch/paths-store" > "$scratch/out" 2>&1) \
+            || ! grep -q -x -F '  --> cmd/warns/main.ldn:2:5' "$scratch/out" \
+            || grep -q 'packages/dev701' "$scratch/out"; then
+            cat "$scratch/out"
+            echo "FAILED paths: refine's warning does not name the project's file ($turn build)"
+            paths=no
+        fi
+    done
+    if ! grep -q -x 'step warns: kept' "$scratch/out"; then
+        cat "$scratch/out"
+        echo "FAILED paths: the second build did not keep the step that warns"
+        paths=no
+    fi
+    status=0
+    (cd "$scratch/named" && env -u LANDIN_REFINE "$build" --refine "$refine" \
+        --store "$scratch/paths-store" wrong > "$scratch/out" 2>&1) || status=$?
+    if [ "$status" -ne 1 ] \
+        || ! grep -q -x -F '  --> cmd/wrong/main.ldn:2:12' "$scratch/out" \
+        || grep -q 'packages/dev701' "$scratch/out"; then
+        cat "$scratch/out"
+        echo "FAILED paths: refine's error does not name the project's file"
+        paths=no
+    fi
+fi
+[ "$paths" = ok ] || failed=$((failed + 1))
 #  peak NAME ARGUMENTS...: the peak resident size, in KiB, of the tool
 #  run in the case NAME with ARGUMENTS.
 peak() {
