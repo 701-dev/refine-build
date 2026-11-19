@@ -7,6 +7,7 @@ licence  MIT OR Apache-2.0
 
 -- The programs this package provides, and the module each starts in.
 program  refine-build  cmd/build
+program  refine-fetch  cmd/fetch
 
 -- Nothing is needed beyond the library that ships with refine.
 -- A dependency would read:   needs  github.com/owner/name  2.3.1

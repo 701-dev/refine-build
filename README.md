@@ -1,13 +1,17 @@
 # refine-build
 
-A build tool for [Landin](https://github.com/JanHaan/Landin) packages,
-written in Landin. It reads a package's description and its recipe and runs
-the recipe's steps. It is a contributed command of `refine`: on PATH as
-`refine-NAME`, it runs as `refine NAME`.
+Two tools for [Landin](https://github.com/JanHaan/Landin) packages, written
+in Landin. `refine-build` reads a package's description and its recipe and
+runs the recipe's steps. `refine-fetch` fetches the packages the
+description needs and writes the lock that says which they are. Each is a
+contributed command of `refine`: on PATH as `refine-NAME`, it runs as
+`refine NAME`.
 
-**Status: a prototype.** It reads and checks both files, runs steps one
-after another and keeps what each made in a store, so a step whose program
-and inputs are what they were is not run again. It fetches nothing.
+**Status: a prototype.** `refine-build` reads and checks both files, runs
+steps one after another and keeps what each made in a store, so a step
+whose program and inputs are what they were is not run again.
+`refine-fetch` fetches with git and writes `landin.lock`. A build does not
+yet use what was fetched: one of a package with `needs` or `uses` is refused.
 
 ## Building it
 
@@ -18,8 +22,9 @@ and inputs are what they were is not run again. It fetches nothing.
 
 The first line builds the tool by hand. The second has that tool build
 itself from `landin.recipe`; `.landin/out/tool/refine-build` is then the
-same file byte for byte. Run the second line again and it runs nothing:
-both steps are kept.
+same file byte for byte, and `.landin/out/fetcher/refine-fetch` is the
+other program: `bootstrap.sh` builds `refine-build` only. Run the second
+line again and it runs nothing: every step is kept.
 
 ## Using it
 
@@ -58,6 +63,10 @@ asking it to describe itself. The tool answers what that takes:
 the refine a `run refine ...` line means. `--refine PATH` overrides it, and
 run by its own name the tool takes the first `refine` on PATH.
 
+`refine-fetch` answers the same four, with the name `fetch` and the prefix
+`RF`, and `refine fetch` runs it. Both programs explain every code of the
+package, whichever prefix it has.
+
 **`refine build` does not work yet.** `refine` reserves the word `build`
 and dispatches nothing under it: it answers "build is reserved for future
 project orchestration". Until that changes, run the tool by its own name.
@@ -78,8 +87,76 @@ needs    ../name                    -- or a local directory, taken as it is
 uses     github.com/owner/tool  0.4.0   -- a tool for the recipe, in the same three forms
 ```
 
-`needs` and `uses` are read and checked, and a build with either is
-refused, since nothing fetches a package yet.
+A location says where a package is fetched from; it is not the package's
+name. The name is the `package` line of the description found there, and
+that is what a source file imports. A local path, which starts with `.` or
+`/`, is a directory that holds a package and is taken as it is.
+
+## Fetching: `refine-fetch`
+
+Run in a package's directory:
+
+```sh
+refine-fetch                  # make the lock say what the description asks for
+refine-fetch --update         # choose every version anew
+refine-fetch --update t/name  # or those of the packages named
+refine-fetch --check          # say whether lock and store serve; fetch nothing
+```
+
+It reads `landin.package`, finds every package that is needed, directly or
+by another package, puts each in the store, and writes `landin.lock`. A
+line of the lock that still serves is kept as it is, so a lock that is
+right is not written again. After a change it says what was added, changed
+and dropped, each with its version, location, size and licence.
+
+- **Versions.** `2.3.1` is the tag `v2.3.1` or `2.3.1` of the repository.
+  A `needs` line gives the least version. Of the versions asked for one
+  package the latest is taken; when a breaking change lies between two of
+  them, another major or below 1.0.0 another minor, the fetch is refused
+  and names both that ask. Nothing later than what is asked for is ever
+  chosen.
+- **One name, once.** A program holds a package name once. The same name
+  at two locations is refused, unless the package being built names one of
+  them in its own `needs`, or holds the package in a local path: then that
+  one is taken for every package, and a note says so. That is how a fork
+  stands in for the original.
+- **Local paths** are for the package being built and its local packages.
+  They have no line in the lock; what they need has.
+- **Tools.** A `uses` line is fetched like a `needs` line.
+
+### The lock: `landin.lock`
+
+```
+lock 1
+package  t/alpha  github.com/t/alpha  1.2.0     commit 9c1e...  tree 5b0a...
+tool     t/gen    github.com/t/gen    untagged  commit 77d2...  tree e913...
+instead  github.com/other/alpha  t/alpha
+```
+
+One line for each fetched package, in the order of their names: the name,
+the location, the version whose tag gave the commit or `untagged`, the
+commit, and the content hash of what the commit holds, which is also the
+name of its entry in the store. `tool` is a package that is only used.
+`instead` says that a location some package asks for is not fetched,
+because the name it holds comes from elsewhere. Keep the lock with the
+sources. `refine-fetch` writes it; do not write it by hand.
+
+### What `refine-fetch` trusts
+
+- **git and its configuration.** A location is given to git as
+  `https://LOCATION`, as one word after a `--`, and its characters are
+  checked first. Credentials, proxies and `url.*.insteadOf` rewrites are
+  git's; a rewrite decides what a location means on a machine. Hooks are
+  switched off for the fetch and the checkout; submodules and large-file
+  pointers are not followed.
+- **The remote, the first time.** Whatever commit a tag names when a
+  version is first chosen goes into the lock. Nothing checks who made it.
+- **The lock, from then on.** With a line in the lock no tag is asked: the
+  line's commit is fetched, and what it holds has to hash to the line's
+  tree, or the fetch is refused. A tag that moves changes nothing until
+  `--update`.
+- **The store** holds a bare repository for each location, `git/HASH`, and
+  each fetched commit as an entry like any step's output.
 
 ## The recipe: `landin.recipe`
 
@@ -177,6 +254,12 @@ entries are read-only: `chmod -R u+w` it first.
 |---|---|
 | `landin.package`, `landin.recipe` | This package's own description and recipe. |
 | `cmd/build/` | The `refine-build` program: the command line, and the order of work. |
+| `cmd/fetch/` | The `refine-fetch` program. |
+| `command/` | What both programs do the same way: the command line, `explain`, completions. |
+| `fetch/` | Choosing versions, git, and writing the lock. |
+| `lock/` | Reading and writing `landin.lock`. |
+| `packages/` | The packages of a program, as the lock and the store give them. |
+| `programs/` | Running a program for what it answers. |
 | `text/lines/` | The reader for keyword-first line files. |
 | `text/strings/` | Byte strings: copies and comparisons. |
 | `codes/` | The codes of the tool's refusals and what each means, in one place. |
@@ -190,7 +273,7 @@ entries are read-only: `chmod -R u+w` it first.
 | `hash/file/` | A file's content hash, read in blocks. |
 | `hash/tree/` | A directory tree's content hash, and the form it is made from. |
 | `report/` | What the tool says on standard error. |
-| `tests/` | Small projects and the script that runs the tool over them. |
+| `tests/` | Small projects and the scripts that run the tools over them. |
 | `bootstrap.sh` | Builds the tool by hand. |
 
 Modules import each other by their full name, `dev701/refine_build/text/lines`,
@@ -224,6 +307,16 @@ It then asks the tool to explain every code it lists, and holds that list
 to `codes/codes.ldn` and to the codes the cases expect. With a refine, it
 also puts the tool on PATH and runs it through `refine`: a build of this
 package, `refine help`, a forwarded `refine explain` and a completion.
+
+With a refine it also runs `tests/fetch.sh` on the `refine-fetch` the
+self-build made. No check there reaches a network: the packages are small
+git repositories the script makes, and git is told through its environment
+that `https://example.test/` is their directory. It checks a chain of
+three packages, one package asked for at two versions, a breaking change
+between two, both spellings of a tag and the two at different commits, a
+commit named itself, a tag that moved, content that is not the lock's, a
+fork standing in, a local path, a lock that is right left byte for byte,
+`--update`, `--check`, and the command through `refine fetch`.
 
 The script also checks memory. It repeats a whole build in one process
 with `--repeat N`, an option for this test only, a few times and many

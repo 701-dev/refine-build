@@ -16,7 +16,11 @@ step tool  compile  with packages
     set  entry  cmd/build
     set  name   refine-build
 
+step fetcher  compile  with packages
+    set  entry  cmd/fetch
+    set  name   refine-fetch
+
 step checked  check  with packages
     set  entry  cmd/build
 
-default tool checked
+default tool fetcher checked

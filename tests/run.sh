@@ -101,15 +101,32 @@ if [ -n "$refine" ]; then
         (cd "$root" && env -u LANDIN_REFINE "$build" --refine "$refine" \
             --store "$scratch/self-store" > "$scratch/self.said" 2>&1) || true
         if [ "$(cat "$scratch/self.said")" != "step tool: kept
+step fetcher: kept
 step checked: kept" ]; then
             cat "$scratch/self.said"
-            echo "FAILED self-build: a second build does not keep both steps"
+            echo "FAILED self-build: a second build does not keep every step"
             failed=$((failed + 1))
         elif ! cmp "$build" "$root/.landin/out/tool/refine-build"; then
             echo "FAILED self-build: the tool kept differs from the tool that built it"
             failed=$((failed + 1))
         fi
     fi
+fi
+#  refine-fetch, which the self-build made, and building with what it
+#  fetched: tests/fetch.sh, whose checks are counted here.
+if [ -n "$refine" ] && [ -x "$(dirname "$here")/.landin/out/fetcher/refine-fetch" ]; then
+    mkdir "$scratch/fetching"
+    cp "$(dirname "$here")/.landin/out/fetcher/refine-fetch" "$scratch/refine-fetch"
+    "$here/fetch.sh" "$scratch/refine-fetch" "$build" "$refine" "$scratch/fetching" \
+        > "$scratch/fetch.said" 2>&1 || true
+    grep -v '^fetch checks: ' "$scratch/fetch.said" || true
+    tally=$(grep '^fetch checks: ' "$scratch/fetch.said" || echo "fetch checks: 1 run, 1 failed")
+    count=$((count + $(echo "$tally" | sed 's/^fetch checks: \([0-9]*\) run.*/\1/')))
+    failed=$((failed + $(echo "$tally" | sed 's/.*, \([0-9]*\) failed$/\1/')))
+elif [ -n "$refine" ]; then
+    count=$((count + 1))
+    failed=$((failed + 1))
+    echo "FAILED fetch: the self-build made no refine-fetch to check"
 fi
 #  Every code the tool can print is explained.  `explain` lists the codes;
 #  each has to explain itself, each atom of `codes/codes.ldn` has to be in

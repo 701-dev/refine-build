@@ -1,0 +1,256 @@
+-- refine-fetch: makes `landin.lock` say what `landin.package` asks for,
+-- and fetches what the lock names into the store.  It is a contributed
+-- command of `refine`, which runs a `refine-NAME` on PATH as
+-- `refine NAME`, and the only one of this package's programs that reaches
+-- a network.
+--
+--     refine-fetch [--store PATH] [--check]
+--     refine-fetch [--store PATH] --update [NAME...]
+--     refine-fetch explain [CODE]
+--     refine-fetch --describe
+--     refine-fetch --complete -- WORD...
+--
+-- Run in a package's directory.  With no option it keeps every line of
+-- the lock that still serves, chooses versions for what has none, fetches
+-- what the store lacks, and writes the lock when it changed.  `--update`
+-- chooses the versions of the named packages anew, or of all.  `--check`
+-- says whether the lock and the store give what the description asks for,
+-- and fetches nothing.
+--
+-- `--repeat N` is for the tool's own tests and is not in the help: it
+-- does the whole fetch N times in this one process.
+
+import core/io
+import core/region
+import core/text
+import core/vec
+import hosted/blocking
+import hosted/heap
+import dev701/refine_build/codes
+import dev701/refine_build/command
+import dev701/refine_build/fetch
+import dev701/refine_build/files
+import dev701/refine_build/lifetime
+import dev701/refine_build/lock
+import dev701/refine_build/report
+import dev701/refine_build/text/lines
+import dev701/refine_build/text/strings
+
+package_file: []u8 = "landin.package"
+lock_file: []u8 = "landin.lock"
+
+usage: []u8 = """usage: refine-fetch [--store PATH] [--check]
+           refine-fetch [--store PATH] --update [NAME...]
+           refine-fetch explain [CODE]
+
+    Run in a package's directory: makes landin.lock say which commit and
+    which content each package that landin.package needs or uses is, and
+    fetches into the store what it lacks.  A line of the lock that still
+    serves is kept as it is.  Fetching is git's: a location is asked of
+    git as https://LOCATION.
+
+      --update [NAME...]   choose the versions of the packages named, as
+                           the lock spells them, anew; of all with no name
+      --check              say whether the lock and the store give what
+                           the description asks for, and fetch nothing
+      --store PATH         the store; without it,
+                           $XDG_CACHE_HOME/landin/store, or else
+                           $HOME/.cache/landin/store
+      -h, --help           print this and exit
+
+    `explain CODE` says what a code such as RF0101 means, and `explain`
+    alone lists the codes.
+    """
+
+--  What `--describe` answers: Landin's `landin-command-1`.
+description_answer: []u8 = """{"format":"landin-command-1","name":"fetch","summary":"Fetch the packages a description needs and write the lock","codes":["RF"]}"""
+
+fetching: atom
+describing: atom
+explaining: atom
+completing: atom
+
+--  What the command line asked for.
+options: type = struct
+    mode: fetching | describing | explaining | completing
+    store: []u8
+    update: bool
+    check_only: bool
+    help: bool
+    repeat: usize
+    wanted: vec.list([]u8)
+end options
+
+public main: () -> (code: i32) =
+    host := blocking.new()
+    --  The one place the heap is taken (see `lifetime`).
+    parent := heap.new()
+    mut ledger: lifetime.ledger = zeroed
+    memory := region.over(ledger, parent)
+    defer region.release(ledger, parent)
+    code = 0
+    asked: options = arguments(host, memory) else (problem)
+        code = if problem == command.wrong_usage then 2 else 1 end if
+        return
+    end
+    if asked.help then
+        io.write(host, io.out(host), usage) else none
+        return
+    end if
+    match asked.mode
+        describing: begin
+            io.write(host, io.out(host), description_answer) else none
+            io.write(host, io.out(host), "\n") else none
+            return
+        end
+        explaining: begin
+            code = command.explained(host, "refine-fetch",
+                                     vec.used(asked.wanted))
+            return
+        end
+        completing: begin
+            completed(host, memory, vec.used(asked.wanted))
+            return
+        end
+        fetching: code = 0
+    end match
+    mut round: usize = 0
+    while round < asked.repeat do
+        once(host, parent, asked) else (problem)
+            _ = problem
+            code = 1
+            return
+        end
+        inc round
+    end while
+end main
+
+--  One fetch.  Everything it allocates is in a region of its own,
+--  released when it has ended, however it ended, so it can be repeated.
+once: (escaping host: blocking.host, parent: lifetime.parent,
+       escaping asked: options)
+      -> none ! report.refused =
+    mut ledger: lifetime.ledger = zeroed
+    memory := region.over(ledger, parent)
+    defer region.release(ledger, parent)
+    request: fetch.request = (package_file: package_file,
+                              lock_file: lock_file, store: asked.store,
+                              update: asked.update,
+                              names: vec.used(asked.wanted),
+                              check_only: asked.check_only)
+    try fetch.run(host, memory, parent, request)
+end once
+
+--  Read the command line.  What it gives lives as long as `memory`.
+arguments: (host: blocking.host, memory: lifetime.memory)
+           -> (asked: options) ! report.refused | command.wrong_usage =
+    asked = (mode: fetching, store: "", update: false, check_only: false,
+             help: false, repeat: 1, wanted: vec.new(item: []u8))
+    count: usize = io.argument_count(host)
+    mut at: usize = 0
+    while at < count do
+        word: []u8 = try command.argument(host, memory, at)
+        inc at
+        if asked.mode <> fetching then
+            vec.push(asked.wanted, memory, word) else (problem)
+                command.said(host, problem)
+                fail report.refused
+            end
+        elsif at == 1 and strings.same(word, "--describe") then
+            asked.mode = describing
+        elsif at == 1 and strings.same(word, "explain") then
+            asked.mode = explaining
+        elsif at == 1 and strings.same(word, "--complete") then
+            asked.mode = completing
+        elsif strings.same(word, "--help") or strings.same(word, "-h") then
+            asked.help = true
+        elsif strings.same(word, "--check") then
+            asked.check_only = true
+        elsif strings.same(word, "--update") then
+            asked.update = true
+        elsif strings.same(word, "--store") then
+            asked.store = try command.value(host, memory, at, count, word,
+                                            "PATH")
+            inc at
+        elsif strings.same(word, "--repeat") then
+            times: []u8 = try command.value(host, memory, at, count, word,
+                                            "N")
+            inc at
+            asked.repeat = text.parse_usize(times) else (problem)
+                _ = problem
+                report.say(host, codes.command_line,
+                           ["`--repeat ", times,
+                            "`: the count is a whole number"])
+                fail command.wrong_usage
+            end
+        elsif strings.starts(word, "-") then
+            report.say(host, codes.command_line,
+                       ["unknown option `", word,
+                        "`; `refine-fetch --help` lists the options"])
+            fail command.wrong_usage
+        elsif asked.update then
+            vec.push(asked.wanted, memory, word) else (problem)
+                command.said(host, problem)
+                fail report.refused
+            end
+        else
+            report.say(host, codes.command_line,
+                       ["`", word,
+                        "`: refine-fetch takes no word but a package's name after `--update`; `refine-fetch --help` says more"])
+            fail command.wrong_usage
+        end if
+    end while
+    if asked.check_only and asked.update then
+        report.say(host, codes.command_line,
+                   ["`--check` fetches nothing and `--update` chooses anew; give one of them"])
+        fail command.wrong_usage
+    end if
+end arguments
+
+--  `--complete -- WORD...`: an option, a code after `explain`, or after
+--  `--update` a name the lock in this directory has.
+completed: (host: blocking.host, memory: lifetime.memory, given: [][]u8)
+           -> none =
+    mut words: [][]u8 = given
+    if lenof words > 0 and strings.same(words[0], "--") then
+        words = words[1..<lenof words]
+    end if
+    return when lenof words == 0
+    typed: []u8 = words[lenof words - 1]
+    if lenof words > 1 then
+        return when strings.same(words[lenof words - 2], "--store")
+        if strings.same(words[0], "explain") then
+            return when lenof words > 2
+            command.codes_offered(host, typed)
+            return
+        end if
+    end if
+    if strings.starts(typed, "-") then
+        command.offered(host, typed, "--check")
+        command.offered(host, typed, "--help")
+        command.offered(host, typed, "--store")
+        command.offered(host, typed, "--update")
+        return
+    end if
+    if lenof words == 1 then command.offered(host, typed, "explain") end if
+    mut updating: bool = false
+    for word in words do
+        if strings.same(word, "--update") then updating = true end if
+    end for
+    return when not updating
+    source: []u8 = files.read_all(host, memory, lock_file) else (problem)
+        _ = problem
+        return
+    end
+    read: lines.document = lines.read(memory, source) else (problem)
+        _ = problem
+        return
+    end
+    for item in vec.used(read.lines) do
+        named: [][]u8 = vec.used(item.words)
+        if lenof named > 1 and (strings.same(named[0], "package")
+                                or strings.same(named[0], "tool")) then
+            command.offered(host, typed, named[1])
+        end if
+    end for
+end completed
