@@ -1,0 +1,236 @@
+-- The content hash of a directory tree: one SHA-256 that is the same for
+-- the same content, wherever and whenever it was written.  It is the
+-- SHA-256 of this byte string, which another program can make as well:
+--
+--     the 14 bytes `landin-tree-1` and a line feed, which name the form
+--     then one record for everything in the tree, the root left out, in
+--     the order of the records' paths compared byte by byte:
+--
+--         one byte      `d` a directory, `f` a file, `x` a file its owner
+--                       may execute, `l` a symbolic link
+--         eight bytes   the length of the path, most significant first
+--         the path      relative to the root, its parts joined by `/`
+--         for `f`, `x`  eight bytes, the length of the content, most
+--                       significant first, and the 32 bytes of the
+--                       content's SHA-256
+--         for `l`       eight bytes, the length of the target, most
+--                       significant first, and the target as the link
+--                       holds it
+--         for `d`       nothing more
+--
+-- So an empty directory counts, and a name, an owner's execute bit and a
+-- link's target each count.  Times, owners and every other permission bit
+-- do not.  A link is never followed, so one that points outside the tree
+-- counts as its target's text.  What is neither file, directory nor link,
+-- a socket or a device, has no record and is refused.
+--
+-- The root is named through links.  The caller may name entries of the
+-- root itself to leave out, with all they hold, as a package leaves out
+-- `.landin` and its version control's directory.
+--
+-- A file is read in blocks and never held whole (see `hash/file`).  The
+-- list of a tree's paths lives in a region of this module's own, released
+-- before it returns.
+
+import core/cmp
+import core/io
+import core/region
+import core/sort
+import core/text
+import core/vec
+import hosted/blocking
+import platform/posix
+import dev701/refine_build/codes
+import dev701/refine_build/hash/file
+import dev701/refine_build/hash/sha256
+import dev701/refine_build/lifetime
+import dev701/refine_build/report
+import dev701/refine_build/text/strings
+
+--  The form's name, which every tree's byte string starts with.
+form: []u8 = "landin-tree-1\n"
+
+--  One thing in a tree: its path from the working directory, of which the
+--  last `relative` bytes are its path from the root, and its record's
+--  first byte.
+entry: type = struct
+    path: []u8
+    relative: usize
+    letter: u8
+end entry
+
+--- The hash of the tree under the directory `root`, without the entries
+--- of the root that `leave` names.  The memory it needs is taken from
+--- `parent` and given back before it returns.
+public of_tree: (host: blocking.host, parent: lifetime.parent, root: []u8,
+                 leave: [][]u8) -> (sum: sha256.digest) ! report.refused =
+    mut ledger: lifetime.ledger = zeroed
+    memory := region.over(ledger, parent)
+    defer region.release(ledger, parent)
+    sum = zeroed
+    top: posix.status = posix.status_at(posix.working_directory,
+                                        text.host_over(root), true)
+        else (problem)
+        report.at_line(host, codes.file_unread, root, 0,
+                       [posix.words(problem)])
+        fail report.refused
+    end
+    if top.kind <> posix.directory then
+        report.at_line(host, codes.tree_unhashable, root, 0,
+                       ["a tree's root is a directory, and this is none"])
+        fail report.refused
+    end if
+    mut entries := vec.new(item: entry)
+    try gathered(host, memory, entries, root, lenof root, leave)
+    order: usize = 0
+    sort.sort_by(vec.used(entries), order, earlier)
+    mut running := sha256.start()
+    sha256.add(running, form)
+    count: usize = vec.length(entries)
+    mut index: usize = 0
+    while index < count do
+        item: entry = vec.get(entries, index) else (problem)
+            report.say(host, codes.host_refused, [posix.words(problem)])
+            fail report.refused
+        end
+        inc index
+        relative: []u8 = item.path[lenof item.path - item.relative
+                                   ..<lenof item.path]
+        sha256.add(running, [item.letter])
+        measured(running, u64(lenof relative))
+        sha256.add(running, relative)
+        if item.letter == u8('f') or item.letter == u8('x') then
+            held: file.content = try file.of(host, item.path, 0)
+            measured(running, held.length)
+            sha256.add(running, held.sum[0..<32])
+        elsif item.letter == u8('l') then
+            mut room: [4097]u8 = zeroed
+            target: text.host_string =
+                posix.read_link_at(posix.working_directory,
+                                   text.host_over(item.path), room)
+                else (problem)
+                    if problem == posix.erange then
+                        report.at_line(host, codes.tree_unhashable,
+                                       item.path, 0,
+                                       ["the link's target is longer than 4096 bytes"])
+                    else
+                        report.at_line(host, codes.file_unread, item.path, 0,
+                                       [posix.words(problem)])
+                    end if
+                    fail report.refused
+                end
+            measured(running, u64(lenof text.host_bytes(target)))
+            sha256.add(running, text.host_bytes(target))
+        end if
+    end while
+    sum = sha256.finish(running)
+end of_tree
+
+--  Whether `left`'s record comes before `right`'s: by their paths from the
+--  root, byte by byte.
+earlier: (by: usize, left: entry, right: entry) -> (yes: bool) =
+    _ = by
+    yes = cmp.compare(left.path, right.path) == cmp.less
+end earlier
+
+--  Take the eight bytes of `length`, most significant first, into the
+--  hash.
+measured: (inout running: sha256.state, length: u64) -> none =
+    mut bytes: [8]u8 = zeroed
+    for at in usize(0)..<8 do
+        bytes[at] = u8((length >> u64(56 - 8 * at)) & 0xff)
+    end for
+    sha256.add(running, bytes[0..<8])
+end measured
+
+--  Add everything under the directory `path` to `entries`, the paths made
+--  in `memory`.  The root of the tree is the first `root` bytes of `path`;
+--  `leave` names entries to pass over in the root itself.
+gathered: (host: blocking.host, memory: lifetime.memory,
+           inout entries: vec.list(entry), path: []u8, root: usize,
+           leave: [][]u8) -> none ! report.refused =
+    mut below := vec.new(item: []u8)
+    try listed(host, memory, below, path)
+    count: usize = vec.length(below)
+    mut index: usize = 0
+    while index < count do
+        whole: []u8 = vec.get(below, index) else (problem)
+            report.say(host, codes.host_refused, [posix.words(problem)])
+            fail report.refused
+        end
+        inc index
+        if lenof path == root then
+            name: []u8 = whole[root + 1..<lenof whole]
+            mut left: bool = false
+            for other in leave do
+                if strings.same(other, name) then left = true end if
+            end for
+            continue when left
+        end if
+        status: posix.status = posix.status_at(posix.working_directory,
+                                               text.host_over(whole), false)
+            else (problem)
+            report.at_line(host, codes.file_unread, whole, 0,
+                           [posix.words(problem)])
+            fail report.refused
+        end
+        mut letter: u8 = u8('f')
+        match status.kind
+            posix.regular: begin
+                if status.permissions & 0o100 <> 0 then letter = u8('x') end if
+            end
+            posix.directory: letter = u8('d')
+            posix.symbolic_link: letter = u8('l')
+            _: begin
+                report.at_line(host, codes.tree_unhashable, whole, 0,
+                               ["neither a file, a directory nor a link, so a tree's hash has no place for it; remove it or leave its directory out"])
+                fail report.refused
+            end
+        end match
+        found: entry = (path: whole, relative: lenof whole - root - 1,
+                        letter: letter)
+        vec.push(entries, memory, found) else (problem)
+            report.say(host, codes.host_refused, [posix.words(problem)])
+            fail report.refused
+        end
+        if letter == u8('d') then
+            try gathered(host, memory, entries, whole, root, leave)
+        end if
+    end while
+end gathered
+
+--  The paths of what the directory `path` holds, made in `memory`, in the
+--  system's order.
+listed: (host: blocking.host, memory: lifetime.memory,
+         inout below: vec.list([]u8), path: []u8)
+        -> none ! report.refused =
+    mut buffer: [io.directory_buffer]u8 = zeroed
+    mut listing: io.directory =
+        io.open_directory(host, text.host_over(path), buffer) else (problem)
+            report.at_line(host, codes.file_unread, path, 0,
+                           [posix.words(problem)])
+            fail report.refused
+        end
+    loop do
+        item: io.entry = io.read_entry(host, listing) else (problem)
+            io.close_directory(host, listing) else none
+            report.at_line(host, codes.file_unread, path, 0,
+                           [posix.words(problem)])
+            fail report.refused
+        end
+        name: []u8 = text.host_bytes(item.name)
+        break when lenof name == 0
+        whole: []u8 = strings.joined(memory, [path, "/", name])
+            else (problem)
+            io.close_directory(host, listing) else none
+            report.say(host, codes.host_refused, [posix.words(problem)])
+            fail report.refused
+        end
+        vec.push(below, memory, whole) else (problem)
+            io.close_directory(host, listing) else none
+            report.say(host, codes.host_refused, [posix.words(problem)])
+            fail report.refused
+        end
+    end loop
+    io.close_directory(host, listing) else none
+end listed

@@ -20,10 +20,13 @@
 #  the dispatcher check runs the tool through `refine` as a contributed
 #  command: a build, help, a forwarded explanation and a completion.
 #
-#  The hash check goes through `--hash-file`, an option for this test
-#  only.  SHA-256 is held to the FIPS 180-4 examples, to lengths around a
-#  block's edges and to `sha256sum` on real files, read in chunks of
-#  several sizes.  It says so when there is no `sha256sum`.
+#  The hash checks go through `--hash-file` and `--hash-tree`, options for
+#  these tests only.  SHA-256 is held to the FIPS 180-4 examples, to lengths
+#  around a block's edges and to `sha256sum` on real files, read in chunks
+#  of several sizes.  The tree hash is held to a hash written here, which a
+#  few lines of Python make again from the form `hash/tree/tree.ldn`
+#  describes, and to what must and must not change it.  They need
+#  `sha256sum` and `python3` and say so when one is missing.
 #
 #  A case is a directory: `command` holds the arguments, one line of plain
 #  words; `expected` what both streams said, then `[exit N]`; `produces`,
@@ -227,6 +230,119 @@ else
     echo "sha256 not compared with sha256sum: there is none"
 fi
 [ "$hashes" = ok ] || failed=$((failed + 1))
+#  The tree hash, through --hash-tree.
+#  planted DIRECTORY ORDER: make the fixed tree in DIRECTORY, its entries
+#  made in one order or the other.
+planted() {
+    mkdir -p "$1"
+    if [ "$2" = forwards ]; then
+        mkdir -p "$1/a" "$1/dir/empty"
+        printf 'hello\n' > "$1/a/one.txt"
+        : > "$1/a.b"
+        printf '#!/bin/sh\n' > "$1/run.sh"
+        chmod 755 "$1/run.sh"
+        ln -s a/one.txt "$1/link"
+        ln -s /outside/the/tree "$1/away"
+    else
+        ln -s /outside/the/tree "$1/away"
+        ln -s a/one.txt "$1/link"
+        printf '#!/bin/sh\n' > "$1/run.sh"
+        chmod 755 "$1/run.sh"
+        mkdir -p "$1/dir/empty"
+        : > "$1/a.b"
+        mkdir "$1/a"
+        printf 'hello\n' > "$1/a/one.txt"
+    fi
+    chmod 644 "$1/a/one.txt" "$1/a.b"
+}
+#  tree DIRECTORY [NAME...]: the tool's hash of the tree, NAMEs left out.
+tree() {
+    directory=$1
+    shift
+    leaving=
+    for left in "$@"; do leaving="$leaving --leave $left"; done
+    # shellcheck disable=SC2086  # the names are plain words
+    "$build" --hash-tree "$directory" $leaving 2>&1 || true
+}
+#  differs WHAT DIRECTORY: the tree's hash is another than the fixed one.
+differs() {
+    if [ "$(tree "$2")" = "$fixed" ]; then
+        echo "FAILED tree hash: $1 does not change it"
+        trees=no
+    fi
+}
+count=$((count + 1))
+trees=ok
+fixed=ced509cf639a5553d1294cd6009e269a9f92458c03db123f5af7ec4326110092
+planted "$scratch/tree" forwards
+planted "$scratch/tree-back" backwards
+if [ "$(tree "$scratch/tree")" != "$fixed" ]; then
+    echo "FAILED tree hash: the fixed tree hashes to $(tree "$scratch/tree"), not $fixed"
+    trees=no
+fi
+if [ "$(tree "$scratch/tree-back")" != "$fixed" ]; then
+    echo "FAILED tree hash: the same tree made in another order hashes differently"
+    trees=no
+fi
+if command -v python3 > /dev/null 2>&1; then
+    again=$(python3 "$here/tree_hash.py" "$scratch/tree")
+    if [ "$again" != "$fixed" ]; then
+        echo "FAILED tree hash: tests/tree_hash.py makes $again, not $fixed"
+        trees=no
+    fi
+    again=$(python3 "$here/tree_hash.py" "$scratch/tree" dir away)
+    if [ "$again" != "$(tree "$scratch/tree" dir away)" ]; then
+        echo "FAILED tree hash: tests/tree_hash.py and the tool differ on a tree with entries left out"
+        trees=no
+    fi
+else
+    echo "tree hash not made a second time: there is no python3"
+fi
+#  vary NAME: a fresh copy of the fixed tree, to change one thing in.
+vary() {
+    varied=$scratch/tree-$1
+    planted "$varied" forwards
+}
+vary content; printf 'hullo\n' > "$varied/a/one.txt"
+differs "a file's content" "$varied"
+vary length; printf 'hello\n\n' > "$varied/a/one.txt"
+differs "a file's length" "$varied"
+vary name; mv "$varied/a.b" "$varied/a.c"
+differs "a file's name" "$varied"
+vary bit; chmod 644 "$varied/run.sh"
+differs "the execute bit" "$varied"
+vary target; ln -sfn a/two.txt "$varied/link"
+differs "a link's target" "$varied"
+vary empty; mkdir "$varied/dir/another"
+differs "an added empty directory" "$varied"
+vary kind; rm "$varied/a.b"; mkdir "$varied/a.b"
+differs "a file become a directory" "$varied"
+#  What does not count: a time, and a permission bit other than the
+#  owner's execute bit.
+vary same; touch -d '2001-01-01' "$varied/a/one.txt"; chmod 600 "$varied/a.b"
+if [ "$(tree "$varied")" != "$fixed" ]; then
+    echo "FAILED tree hash: a file's time or its read bits change it"
+    trees=no
+fi
+#  An entry left out is as good as absent, but only in the root.
+vary left; mkdir -p "$varied/.landin/x" "$varied/dir/.landin"
+if [ "$(tree "$varied" .landin)" = "$fixed" ]; then
+    echo "FAILED tree hash: --leave also leaves out a name below the root"
+    trees=no
+fi
+rmdir "$varied/dir/.landin"
+if [ "$(tree "$varied" .landin)" != "$fixed" ]; then
+    echo "FAILED tree hash: an entry of the root that is left out changes it"
+    trees=no
+fi
+#  What has no record is refused.
+vary pipe; mkfifo "$varied/dir/pipe"
+said=$(cd "$scratch" && "$build" --hash-tree tree-pipe 2>&1) && status=0 || status=$?
+if [ "$status" -ne 1 ] || [ "${said%%:*}" != "error[RB0501]" ]; then
+    echo "FAILED tree hash: a named pipe is not refused with RB0501: $said"
+    trees=no
+fi
+[ "$trees" = ok ] || failed=$((failed + 1))
 #  peak NAME ARGUMENTS...: the peak resident size, in KiB, of the tool
 #  run in the case NAME with ARGUMENTS.
 peak() {

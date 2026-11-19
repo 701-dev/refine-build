@@ -19,9 +19,11 @@
 -- the whole build N times in this one process, as a watch mode would, so
 -- that a test can see that the memory in use does not grow with N.
 --
--- `--hash-file PATH` is for the tests as well, and not in the help
--- either: it prints the SHA-256 of a file, read `--chunk N` bytes at a
--- time when that is given.  No build uses a hash yet.
+-- `--hash-file PATH` and `--hash-tree PATH` are for the tests as well, and
+-- not in the help either.  The first prints the SHA-256 of a file, read
+-- `--chunk N` bytes at a time when that is given; the second the content
+-- hash of a directory tree (see `hash/tree`), without the entries of its
+-- root that each `--leave NAME` names.  No build uses a hash yet.
 
 import core/failure
 import core/io
@@ -35,6 +37,7 @@ import dev701/refine_build/description
 import dev701/refine_build/files
 import dev701/refine_build/hash/file
 import dev701/refine_build/hash/sha256
+import dev701/refine_build/hash/tree
 import dev701/refine_build/lifetime
 import dev701/refine_build/recipe
 import dev701/refine_build/report
@@ -81,7 +84,9 @@ options: type = struct
     repeat: usize
     wanted: vec.list([]u8)
     hash_file: []u8
+    hash_tree: []u8
     chunk: usize
+    leave: vec.list([]u8)
 end options
 
 public main: () -> (code: i32) =
@@ -119,8 +124,8 @@ public main: () -> (code: i32) =
         end
         building: code = 0
     end match
-    if lenof asked.hash_file > 0 then
-        code = hashed(host, asked)
+    if lenof asked.hash_file > 0 or lenof asked.hash_tree > 0 then
+        code = hashed(host, parent, asked)
         return
     end if
     mut round: usize = 0
@@ -209,7 +214,7 @@ arguments: (host: blocking.host, memory: lifetime.memory)
            -> (asked: options) ! report.refused | wrong_usage =
     asked = (mode: building, refine: "", check_only: false, help: false,
              repeat: 1, wanted: vec.new(item: []u8), hash_file: "",
-             chunk: 0)
+             hash_tree: "", chunk: 0, leave: vec.new(item: []u8))
     count: usize = io.argument_count(host)
     mut at: usize = 0
     while at < count do
@@ -257,6 +262,16 @@ arguments: (host: blocking.host, memory: lifetime.memory)
         elsif strings.same(word, "--hash-file") then
             asked.hash_file = try value(host, memory, at, count, word, "PATH")
             inc at
+        elsif strings.same(word, "--hash-tree") then
+            asked.hash_tree = try value(host, memory, at, count, word, "PATH")
+            inc at
+        elsif strings.same(word, "--leave") then
+            name: []u8 = try value(host, memory, at, count, word, "NAME")
+            inc at
+            vec.push(asked.leave, memory, name) else (problem)
+                said(host, problem)
+                fail report.refused
+            end
         elsif strings.same(word, "--chunk") then
             size: []u8 = try value(host, memory, at, count, word, "N")
             inc at
@@ -297,17 +312,28 @@ value: (host: blocking.host, memory: lifetime.memory, at: usize,
     word = try argument(host, memory, at)
 end value
 
---  `--hash-file`: print the file's SHA-256 as 64 hexadecimal digits and a
---  line end.  The status is 0, or 1 when the file could not be read, which
---  was said.
-hashed: (host: blocking.host, asked: options) -> (status: i32) =
+--  `--hash-file` and `--hash-tree`: print the hash as 64 hexadecimal
+--  digits and a line end.  The status is 0, or 1 when something could not
+--  be hashed, which was said.
+hashed: (host: blocking.host, parent: lifetime.parent, asked: options)
+        -> (status: i32) =
     status = 1
-    held: file.content =
-        file.of(host, asked.hash_file, asked.chunk) else (problem)
+    mut sum: sha256.digest = zeroed
+    if lenof asked.hash_file > 0 then
+        held: file.content =
+            file.of(host, asked.hash_file, asked.chunk) else (problem)
+                _ = problem
+                return
+            end
+        sum = held.sum
+    else
+        sum = tree.of_tree(host, parent, asked.hash_tree,
+                           vec.used(asked.leave)) else (problem)
             _ = problem
             return
         end
-    spelled: sha256.spelling = sha256.hex(held.sum)
+    end if
+    spelled: sha256.spelling = sha256.hex(sum)
     io.write(host, io.out(host), spelled[0..<64]) else none
     io.write(host, io.out(host), "\n") else none
     status = 0

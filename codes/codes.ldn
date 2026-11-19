@@ -34,6 +34,7 @@ public step_shadows_path: atom
 public program_missing: atom
 public program_unstarted: atom
 public step_failed: atom
+public tree_unhashable: atom
 
 --- One kind of thing the tool refuses.
 public code: type =
@@ -41,18 +42,18 @@ public code: type =
     keyword_unknown | line_shape | said_twice | package_name | line_missing |
     not_fetched | rule_runs_nothing | placeholder | name_unknown |
     steps_circle | input_unknown | step_shadows_path | program_missing |
-    program_unstarted | step_failed
+    program_unstarted | step_failed | tree_unhashable
 
 --- No code is spelled that way.
 public unknown: atom
 
 --- Every code, in the order `refine-build explain` lists them.
-all: [20]code = [command_line, file_unread, host_refused, no_refine,
+all: [21]code = [command_line, file_unread, host_refused, no_refine,
                  line_unreadable, keyword_unknown, line_shape, said_twice,
                  package_name, line_missing, not_fetched, rule_runs_nothing,
                  placeholder, name_unknown, steps_circle, input_unknown,
                  step_shadows_path, program_missing, program_unstarted,
-                 step_failed]
+                 step_failed, tree_unhashable]
 
 --- How many codes there are.
 public count: () -> (number: usize) =
@@ -98,6 +99,7 @@ public spelled: (which: code) -> (spelling: []u8) =
         program_missing: spelling = "RB0401"
         program_unstarted: spelling = "RB0402"
         step_failed: spelling = "RB0403"
+        tree_unhashable: spelling = "RB0501"
     end match
 end spelled
 
@@ -227,6 +229,14 @@ public about: (which: code) -> (words: []u8) =
             A step's program ended with a status other than 0, or a signal
             ended it. What the program said is above the message. The build
             stops at the first step that fails, and its status is 1.
+            """
+        tree_unhashable: words = """
+            A directory tree's content hash has a place for files,
+            directories and symbolic links and for nothing else. The path
+            in the message is a socket, a device or a named pipe, or a link
+            whose target is longer than 4096 bytes, or it was named as a
+            tree's root and is no directory. Remove it, or leave the
+            directory that holds it out of what is hashed.
             """
     end match
 end about

@@ -122,6 +122,7 @@ Everything the tool writes is under `.landin/`.
 | `files/` | Whole files, directory trees, links, and finding a program on PATH. |
 | `hash/sha256/` | SHA-256, on the language alone, so that it can become a library. An integrity hash; it makes no constant-time claim. |
 | `hash/file/` | A file's content hash, read in blocks. |
+| `hash/tree/` | A directory tree's content hash, and the form it is made from. |
 | `report/` | What the tool says on standard error. |
 | `tests/` | Small projects and the script that runs the tool over them. |
 | `bootstrap.sh` | Builds the tool by hand. |
@@ -150,11 +151,27 @@ with `--repeat N`, an option for this test only, a few times and many
 times, and fails when the many use more memory than the few. It needs GNU
 `time` and says so when there is none.
 
-SHA-256 is checked through `--hash-file PATH`, one more option for the
-tests only. It is held to the FIPS 180-4 examples, to lengths around a
-block's edges and to `sha256sum` on real files, read in chunks of several
-sizes, and a 64 MiB file may take no more memory than a 1 MiB one. No
-build uses a hash yet.
+The hashes are checked through `--hash-file PATH` and `--hash-tree PATH`,
+two more options for the tests only. SHA-256 is held to the FIPS 180-4
+examples, to lengths around a block's edges and to `sha256sum` on real
+files, read in chunks of several sizes, and a 64 MiB file may take no more
+memory than a 1 MiB one.
+
+The tree hash is held to a hash written in the script, which
+`tests/tree_hash.py` makes again from the form that `hash/tree/tree.ldn`
+documents. A tree made in another order has to hash the same; a changed
+content, name, execute bit or link target and an added empty directory
+each have to change it.
+
+## Hashes
+
+No build uses a hash yet; they are the ground the store will stand on. A
+file's content hash is the SHA-256 of its bytes. A tree's is the SHA-256
+of one record for everything under its root, in the byte order of the
+paths: what it is, its path, and for a file the length and SHA-256 of its
+content, for a link its target. Times, owners and permission bits other
+than the owner's execute bit do not count, and an empty directory does.
+`hash/tree/tree.ldn` gives the form exactly.
 
 ## Memory
 
