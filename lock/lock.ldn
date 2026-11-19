@@ -1,0 +1,258 @@
+-- The lock, `landin.lock`: which commit and which content each package of
+-- a program is.  `refine-fetch` writes it, `refine-build` reads it, and it
+-- is kept with the package's sources.
+--
+--     lock 1
+--     package  OWNER/NAME  LOCATION  2.3.1     commit HEX40  tree HEX64
+--     tool     OWNER/NAME  LOCATION  untagged  commit HEX40  tree HEX64
+--     instead  LOCATION    OWNER/NAME
+--
+-- `lock 1` names the form and is the first line.  Then comes one line for
+-- each package that is fetched, in the order of their names compared byte
+-- by byte: `tool` for one the package being built `uses` and nothing
+-- `needs`, `package` for every other.  After the location is the version
+-- whose tag gave the commit, or `untagged` when the commit was named
+-- itself; `tree` is the content hash of what the commit holds, in the form
+-- `hash/tree` describes, which is also the name of its entry in the store.
+--
+-- An `instead` line says that a location some package asks for is not
+-- fetched, because a package of the name it holds comes from elsewhere:
+-- from the location the package being built names, or from a local path.
+-- These lines follow the others, in the order of their locations.
+--
+-- A package from a local path has no line: it is the copy that is there.
+-- The writer gives the same bytes for the same lines, one space between
+-- the words, so a lock that need not change does not.
+
+import core/cmp
+import core/mem
+import core/sort
+import core/vec
+import hosted/blocking
+import dev701/refine_build/codes
+import dev701/refine_build/description
+import dev701/refine_build/lifetime
+import dev701/refine_build/report
+import dev701/refine_build/text/lines
+import dev701/refine_build/text/strings
+
+--- The word in a version's place when a commit was named itself.
+public untagged: []u8 = "untagged"
+
+--- One fetched package.  `version` is empty for `untagged`; `commit` is
+--- forty hexadecimal digits and `tree` sixty-four.
+public line: type = struct
+    tool: bool
+    name: []u8
+    place: []u8
+    version: []u8
+    commit: []u8
+    tree: []u8
+end line
+
+--- A location that is not fetched, and the name of the package that
+--- stands in for what it holds.
+public stand_in: type = struct
+    place: []u8
+    name: []u8
+end stand_in
+
+--- A lock as read, or as it is to be written.
+public lock: type = struct
+    lines: vec.list(line)
+    instead: vec.list(stand_in)
+end lock
+
+--- The lock has no such line.
+public absent: atom
+
+--- A lock with no line.
+public empty: () -> (value: lock) =
+    value = (lines: vec.new(item: line), instead: vec.new(item: stand_in))
+end empty
+
+--- Read the lock in `source`, which is the content of `file`.  Everything
+--- wrong in it is said, each with its line, and then the read fails
+--- `report.refused`.
+public read: (host: blocking.host, memory: lifetime.memory, file: []u8,
+              source: []u8) -> (result: lock)
+             ! report.refused | mem.out_of_memory =
+    result = empty()
+    doc := try lines.read(memory, source)
+    mut wrong: bool = false
+    mut formed: bool = false
+    for item, at in vec.used(doc.lines) do
+        if at == 0 then
+            words: [][]u8 = vec.used(item.words)
+            if item.state == lines.sound and lenof words == 2
+              and strings.same(words[0], "lock")
+              and strings.same(words[1], "1") then
+                formed = true
+                continue
+            end if
+        end if
+        read_line(host, memory, file, item, result) else (problem)
+            fail mem.out_of_memory when problem == mem.out_of_memory
+            wrong = true
+        end
+    end for
+    if not formed then
+        report.at_line(host, codes.line_missing, file, 0,
+                       ["the first line is not `lock 1`, so this is no lock this tool reads; `refine-fetch` writes one, and `refine-fetch --update` writes it anew"])
+        wrong = true
+    end if
+    fail report.refused when wrong
+end read
+
+read_line: (host: blocking.host, memory: lifetime.memory, file: []u8,
+            escaping item: lines.line, inout into: lock)
+           -> none ! report.refused | mem.out_of_memory =
+    if item.state <> lines.sound then
+        report.at_line(host, codes.line_unreadable, file, item.number,
+                       [lines.words_of(item.state)])
+        fail report.refused
+    end if
+    words: [][]u8 = vec.used(item.words)
+    keyword: []u8 = words[0]
+    if strings.same(keyword, "instead") then
+        try wants(host, file, item.number,
+                  lenof words == 3 and description.is_location(words[1])
+                  and is_name(words[2]),
+                  "`instead` takes a location and a package's name: `instead LOCATION OWNER/NAME`")
+        other: stand_in = (place: words[1], name: words[2])
+        try vec.push(into.instead, memory, other)
+        return
+    end if
+    if not strings.same(keyword, "package")
+      and not strings.same(keyword, "tool") then
+        report.at_line(host, codes.keyword_unknown, file, item.number,
+                       ["unknown keyword `", keyword,
+                        "`; a lock line starts with package, tool or instead. `refine-fetch` writes the lock; do not write it by hand"])
+        fail report.refused
+    end if
+    try wants(host, file, item.number,
+              lenof words == 8 and is_name(words[1])
+              and description.is_location(words[2])
+              and (description.is_version(words[3])
+                   or strings.same(words[3], untagged))
+              and strings.same(words[4], "commit")
+              and description.is_commit(words[5])
+              and strings.same(words[6], "tree") and is_hash(words[7]),
+              "a lock line is `package OWNER/NAME LOCATION VERSION commit HEX40 tree HEX64`, the version three numbers or `untagged`. `refine-fetch` writes the lock; do not write it by hand")
+    for other in vec.used(into.lines) do
+        if strings.same(other.name, words[1]) then
+            report.at_line(host, codes.said_twice, file, item.number,
+                           ["`", words[1],
+                            "` has two lines; a program holds a package once. `refine-fetch --update` writes the lock anew"])
+            fail report.refused
+        end if
+    end for
+    mut version: []u8 = words[3]
+    if strings.same(version, untagged) then version = "" end if
+    fetched: line = (tool: strings.same(keyword, "tool"), name: words[1],
+                     place: words[2], version: version, commit: words[5],
+                     tree: words[7])
+    try vec.push(into.lines, memory, fetched)
+end read_line
+
+--- The bytes of the file that holds `value`: the same for the same lines,
+--- whatever order they are in here.  They live as long as `memory`, and
+--- `value`'s lists are put in the file's order.
+public written: (memory: lifetime.memory, inout value: lock)
+                -> (source: []u8) ! mem.out_of_memory =
+    order: usize = 0
+    sort.sort_by(vec.used(value.lines), order, line_earlier)
+    sort.sort_by(vec.used(value.instead), order, stand_in_earlier)
+    mut whole := vec.new(item: u8)
+    try vec.append_bytes(whole, memory, "lock 1\n")
+    for item in vec.used(value.lines) do
+        keyword: []u8 = if item.tool then "tool" else "package" end if
+        version: []u8 = if lenof item.version > 0 then item.version
+                        else untagged end if
+        parts: [12][]u8 = [keyword, " ", item.name, " ", item.place, " ",
+                           version, " commit ", item.commit, " tree ",
+                           item.tree, "\n"]
+        for part in parts do
+            try vec.append_bytes(whole, memory, part)
+        end for
+    end for
+    for item in vec.used(value.instead) do
+        parts: [5][]u8 = ["instead ", item.place, " ", item.name, "\n"]
+        for part in parts do
+            try vec.append_bytes(whole, memory, part)
+        end for
+    end for
+    source = vec.used(whole)
+end written
+
+--- The index of the line for the package fetched from `place`.
+public placed: (value: lock, place: []u8) -> (index: usize) ! absent =
+    for item, at in vec.used(value.lines) do
+        if strings.same(item.place, place) then
+            index = at
+            return
+        end if
+    end for
+    fail absent
+end placed
+
+--- The index of the line for the package called `name`.
+public named: (value: lock, name: []u8) -> (index: usize) ! absent =
+    for item, at in vec.used(value.lines) do
+        if strings.same(item.name, name) then
+            index = at
+            return
+        end if
+    end for
+    fail absent
+end named
+
+--- The name of the package that stands in for what `place` holds.
+public stood_in: (value: lock, place: []u8) -> (name: []u8 from value)
+                 ! absent =
+    for item in vec.used(value.instead) do
+        if strings.same(item.place, place) then
+            name = item.name
+            return
+        end if
+    end for
+    fail absent
+end stood_in
+
+line_earlier: (by: usize, left: line, right: line) -> (yes: bool) =
+    _ = by
+    yes = cmp.compare(left.name, right.name) == cmp.less
+end line_earlier
+
+stand_in_earlier: (by: usize, left: stand_in, right: stand_in)
+                  -> (yes: bool) =
+    _ = by
+    yes = cmp.compare(left.place, right.place) == cmp.less
+end stand_in_earlier
+
+--  Refuse the line with `otherwise` unless `holds`.
+wants: (host: blocking.host, file: []u8, number: usize, holds: bool,
+        otherwise: []u8) -> none ! report.refused =
+    return when holds
+    report.at_line(host, codes.line_shape, file, number, [otherwise])
+    fail report.refused
+end wants
+
+--  Whether `word` is `owner/name` in module path segments.
+is_name: (word: []u8) -> (yes: bool) =
+    cut: usize = strings.find(word, u8('/'))
+    yes = cut < lenof word and strings.is_segment(word[0..<cut])
+          and strings.is_segment(word[cut + 1..<lenof word])
+end is_name
+
+--  Whether `word` is sixty-four hexadecimal digits, letters in lowercase.
+is_hash: (word: []u8) -> (yes: bool) =
+    yes = false
+    return when lenof word <> 64
+    for byte in word do
+        digit: bool = byte >= u8('0') and byte <= u8('9')
+        letter: bool = byte >= u8('a') and byte <= u8('f')
+        return when not (digit or letter)
+    end for
+    yes = true
+end is_hash

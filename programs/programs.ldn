@@ -1,0 +1,98 @@
+-- Running another program to its end and keeping what it wrote: what the
+-- tools ask of `git` and of `refine` when they want an answer, not a step.
+
+import core/io
+import core/mem
+import core/text
+import core/vec
+import hosted/blocking
+import dev701/refine_build/lifetime
+
+--- How a program ended and what it wrote.  `code` is its status, or -1
+--- when a signal ended it.
+public outcome: type = struct
+    code: i32
+    output: []u8
+    errors: []u8
+end outcome
+
+--- The host would not start the program, or lost it.
+public unstarted: atom
+
+--- Add the variables of this process's environment to `variables`, to
+--- give to a child.  The list grows in `memory`.
+public environment: (escaping host: blocking.host, memory: lifetime.memory,
+                     inout variables: vec.list(io.variable))
+                    -> none ! mem.out_of_memory =
+    for at in usize(0)..<io.variable_count(host) do
+        item: io.variable = io.variable_at(host, at) else (problem)
+            _ = problem
+            break
+        end
+        try vec.push(variables, memory, item)
+    end for
+end environment
+
+--- Start the program at `tool` with `words` after its name, its input
+--- connected to nothing, and wait for it.  What it wrote lives as long as
+--- `memory`.
+public ran: (host: blocking.host, memory: lifetime.memory,
+             variables: []io.variable, tool: []u8, words: [][]u8)
+            -> (result: outcome) ! unstarted | mem.out_of_memory =
+    mut arguments := vec.new(item: text.host_string)
+    for word in words do
+        try vec.push(arguments, memory, text.host_over(word))
+    end for
+    mut child: io.child = io.spawn(host, text.host_over(tool),
+                                   vec.used(arguments), variables,
+                                   io.capturing) else (problem)
+        _ = problem
+        fail unstarted
+    end
+    mut output := vec.new(item: u8)
+    mut errors := vec.new(item: u8)
+    mut room: [4096]u8 = zeroed
+    mut short: bool = false
+    loop do
+        got: io.child_read = io.read_child(host, child, room) else (problem)
+            _ = problem
+            break
+        end
+        break when got.finished
+        if got.stream == io.child_errors then
+            vec.append_bytes(errors, memory, room[0..<got.count])
+                else (problem)
+                _ = problem
+                short = true
+            end
+        else
+            vec.append_bytes(output, memory, room[0..<got.count])
+                else (problem)
+                _ = problem
+                short = true
+            end
+        end if
+    end loop
+    ended: io.ending = io.wait(host, child) else (problem)
+        _ = problem
+        fail unstarted
+    end
+    fail mem.out_of_memory when short
+    mut code: i32 = -1
+    match ended.how
+        io.exited(status): code = status
+        io.signalled: code = -1
+    end match
+    result = (code: code, output: vec.used(output), errors: vec.used(errors))
+end ran
+
+--- `bytes` without the line ends and blanks at its end.
+public trimmed: (bytes: []u8) -> (rest: []u8 from bytes) =
+    mut stop: usize = lenof bytes
+    while stop > 0 and (bytes[stop - 1] == u8('\n')
+                        or bytes[stop - 1] == u8('\r')
+                        or bytes[stop - 1] == u8(' ')) do
+        dec stop
+    end while
+    rest = bytes[0..<stop]
+end trimmed

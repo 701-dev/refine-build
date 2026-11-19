@@ -5,8 +5,16 @@
 --     kind     library | program
 --     licence  WORDS...
 --     program  NAME MODULE
---     needs    owner/name MAJOR.MINOR.PATCH
---     uses     owner/name MAJOR.MINOR.PATCH
+--     needs    LOCATION MAJOR.MINOR.PATCH
+--     needs    LOCATION commit FORTY-HEX-DIGITS
+--     needs    PATH
+--     uses     the same three forms
+--
+-- A LOCATION says where a package is fetched from, `github.com/701-dev/utf8`:
+-- a host and a path, which `refine fetch` gives to git as `https://` and
+-- the location.  It is not the package's name: that is the `package` line
+-- of the description found there.  A PATH starts with `.` or `/` and names
+-- a directory on this machine that holds a package, taken as it is.
 
 import core/mem
 import core/vec
@@ -17,13 +25,24 @@ import dev701/refine_build/report
 import dev701/refine_build/text/lines
 import dev701/refine_build/text/strings
 
---- Another package this one needs, or a tool its recipe uses, and the
---- least version of it.
+--- Another package this one needs, or a tool its recipe uses.  `place` is
+--- the location or the local path as written.  A location comes with a
+--- least `version` or with a `commit` of forty hexadecimal digits, and
+--- the other is empty; a local path, `local`, comes with neither.
 public requirement: type = struct
-    name: []u8
+    place: []u8
     version: []u8
+    commit: []u8
+    local: bool
     number: usize
 end requirement
+
+--- A version's three numbers.
+public version: type = struct
+    major: u64
+    minor: u64
+    patch: u64
+end version
 
 --- A program the package provides: the executable's name and the module,
 --- a path inside the package, that holds its `main`.
@@ -141,19 +160,44 @@ read_line: (host: blocking.host, memory: lifetime.memory, file: []u8,
                              number: item.number)
         try vec.push(into.programs, memory, provided)
     elsif strings.same(keyword, "needs") or strings.same(keyword, "uses") then
-        try wants(host, file, item.number, given == 2,
-                  "`needs` and `uses` take two words: `needs owner/name 2.3.1`")
-        try package_name(host, file, item.number, words[1])
-        try wants(host, file, item.number, is_version(words[2]),
-                  "a version is three numbers, `MAJOR.MINOR.PATCH`, such as `2.3.1`")
+        try wants(host, file, item.number, given >= 1 and given <= 3,
+                  "`needs` and `uses` take a location and a version, `needs github.com/owner/name 2.3.1`, a location and a commit, `needs github.com/owner/name commit FORTY-HEX-DIGITS`, or a local path, `needs ../name`")
+        mut wanted: requirement = (place: words[1], version: "", commit: "",
+                                   local: false, number: item.number)
+        if is_local(words[1]) then
+            try wants(host, file, item.number, given == 1,
+                      "a local path is taken as it is and has no version: `needs ../name`")
+            wanted.local = true
+        else
+            if given == 2 and is_version(words[2]) and is_name(words[1]) then
+                report.at_line(host, codes.line_shape, file, item.number,
+                               ["`", words[1],
+                                "` is a package's name and says no place to fetch it from; write the location, as in `",
+                                keyword, " github.com/", words[1], " ",
+                                words[2], "`"])
+                fail report.refused
+            end if
+            try wants(host, file, item.number, is_location(words[1]),
+                      "a location is a host and a path, such as `github.com/owner/name`: letters, digits, `.`, `_`, `~` and `-` between `/`, no part starting with `-` or `.`, and a `.` in the host")
+            if given == 3 then
+                try wants(host, file, item.number,
+                          strings.same(words[2], "commit")
+                          and is_commit(words[3]),
+                          "after a location comes a version, `2.3.1`, or `commit` and the commit's forty hexadecimal digits in lowercase")
+                wanted.commit = words[3]
+            else
+                try wants(host, file, item.number,
+                          given == 2 and is_version(words[2]),
+                          "after a location comes a version of three numbers, `MAJOR.MINOR.PATCH`, such as `2.3.1`, or `commit` and forty hexadecimal digits")
+                wanted.version = words[2]
+            end if
+        end if
         for other in vec.used(into.needs) do
-            try unlike(host, file, item.number, other.name, words[1])
+            try unlike(host, file, item.number, other.place, words[1])
         end for
         for other in vec.used(into.uses) do
-            try unlike(host, file, item.number, other.name, words[1])
+            try unlike(host, file, item.number, other.place, words[1])
         end for
-        wanted: requirement = (name: words[1], version: words[2],
-                               number: item.number)
         if strings.same(keyword, "needs") then
             try vec.push(into.needs, memory, wanted)
         else
@@ -191,7 +235,7 @@ unlike: (host: blocking.host, file: []u8, number: usize, listed: []u8,
     return when not strings.same(listed, name)
     report.at_line(host, codes.said_twice, file, number,
                    ["`", name,
-                    "` is listed twice; a package is needed or used once, at one version"])
+                    "` is listed twice; a package is needed or used once"])
     fail report.refused
 end unlike
 
@@ -234,7 +278,109 @@ public is_module: (path: []u8) -> (yes: bool) =
     yes = true
 end is_module
 
-is_version: (word: []u8) -> (yes: bool) =
+--  Whether `word` is `owner/name` in module path segments.
+is_name: (word: []u8) -> (yes: bool) =
+    cut: usize = strings.find(word, u8('/'))
+    yes = cut < lenof word and strings.is_segment(word[0..<cut])
+          and strings.is_segment(word[cut + 1..<lenof word])
+end is_name
+
+--- Whether `word` is a local path: it starts with `.` or `/`.
+public is_local: (word: []u8) -> (yes: bool) =
+    yes = lenof word > 0 and (word[0] == u8('.') or word[0] == u8('/'))
+end is_local
+
+--- Whether `word` is a location: at least two parts between `/`, each of
+--- letters, digits, `.`, `_`, `~` and `-` and starting with a letter or a
+--- digit, the first, the host, with a `.` in it.  So it can be given to
+--- git after `https://` and is no option and no path out of anything.
+public is_location: (word: []u8) -> (yes: bool) =
+    yes = false
+    mut parts: usize = 0
+    mut rest: []u8 = word
+    loop do
+        cut: usize = strings.find(rest, u8('/'))
+        part: []u8 = rest[0..<cut]
+        return when lenof part == 0
+        mut dotted: bool = false
+        for byte, at in part do
+            lower: bool = byte >= u8('a') and byte <= u8('z')
+            upper: bool = byte >= u8('A') and byte <= u8('Z')
+            digit: bool = byte >= u8('0') and byte <= u8('9')
+            mark: bool = byte == u8('.') or byte == u8('_')
+                         or byte == u8('~') or byte == u8('-')
+            return when not (lower or upper or digit or mark)
+            return when at == 0 and mark
+            if byte == u8('.') then dotted = true end if
+        end for
+        return when parts == 0 and not dotted
+        inc parts
+        break when cut == lenof rest
+        rest = rest[cut + 1..<lenof rest]
+    end loop
+    yes = parts >= 2
+end is_location
+
+--- Whether `word` is a commit's name: forty hexadecimal digits, the
+--- letters in lowercase.
+public is_commit: (word: []u8) -> (yes: bool) =
+    yes = false
+    return when lenof word <> 40
+    for byte in word do
+        digit: bool = byte >= u8('0') and byte <= u8('9')
+        letter: bool = byte >= u8('a') and byte <= u8('f')
+        return when not (digit or letter)
+    end for
+    yes = true
+end is_commit
+
+--- The three numbers of `word`, which `is_version` holds of.
+public numbers_of: (word: []u8) -> (numbers: version) =
+    numbers = (major: 0, minor: 0, patch: 0)
+    mut part: usize = 0
+    for byte in word do
+        if byte == u8('.') then
+            inc part
+        elsif part == 0 then
+            numbers.major = numbers.major * 10 + u64(byte - u8('0'))
+        elsif part == 1 then
+            numbers.minor = numbers.minor * 10 + u64(byte - u8('0'))
+        else
+            numbers.patch = numbers.patch * 10 + u64(byte - u8('0'))
+        end if
+    end for
+end numbers_of
+
+--- Whether a change from one of the two versions to the other may break
+--- what uses the package: another major, or below 1.0.0 another minor.
+public breaking: (left: version, right: version) -> (yes: bool) =
+    yes = left.major <> right.major
+          or (left.major == 0 and left.minor <> right.minor)
+end breaking
+
+--- Whether `left` is an earlier version than `right`.
+public earlier: (left: version, right: version) -> (yes: bool) =
+    if left.major <> right.major then
+        yes = left.major < right.major
+    elsif left.minor <> right.minor then
+        yes = left.minor < right.minor
+    else
+        yes = left.patch < right.patch
+    end if
+end earlier
+
+--- Whether the version `have` serves where at least `want` is asked for:
+--- it is not earlier, and no breaking change lies between them.
+public serves: (have: []u8, want: []u8) -> (yes: bool) =
+    yes = false
+    return when not is_version(have) or not is_version(want)
+    had: version = numbers_of(have)
+    wanted: version = numbers_of(want)
+    yes = not breaking(had, wanted) and not earlier(had, wanted)
+end serves
+
+--- Whether `word` is a version: three numbers with `.` between them.
+public is_version: (word: []u8) -> (yes: bool) =
     yes = false
     mut parts: usize = 1
     mut digits: usize = 0

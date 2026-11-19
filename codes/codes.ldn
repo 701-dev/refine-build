@@ -37,6 +37,23 @@ public step_failed: atom
 public tree_unhashable: atom
 public store_unusable: atom
 public store_nowhere: atom
+public lock_missing: atom
+public lock_stale: atom
+public entry_missing: atom
+public package_wrong: atom
+public import_undeclared: atom
+public tool_wrong: atom
+public git_missing: atom
+public git_failed: atom
+public version_untagged: atom
+public tags_differ: atom
+public commit_unknown: atom
+public tree_differs: atom
+public not_a_package: atom
+public versions_clash: atom
+public locations_clash: atom
+public pins_clash: atom
+public name_unlocked: atom
 
 --- One kind of thing the tool refuses.
 public code: type =
@@ -45,18 +62,52 @@ public code: type =
     not_fetched | rule_runs_nothing | placeholder | name_unknown |
     steps_circle | input_unknown | step_shadows_path | program_missing |
     program_unstarted | step_failed | tree_unhashable | store_unusable |
-    store_nowhere
+    store_nowhere |
+    lock_missing |
+    lock_stale |
+    entry_missing |
+    package_wrong |
+    import_undeclared |
+    tool_wrong |
+    git_missing |
+    git_failed |
+    version_untagged |
+    tags_differ |
+    commit_unknown |
+    tree_differs |
+    not_a_package |
+    versions_clash |
+    locations_clash |
+    pins_clash |
+    name_unlocked
 
 --- No code is spelled that way.
 public unknown: atom
 
 --- Every code, in the order `refine-build explain` lists them.
-all: [23]code = [command_line, file_unread, host_refused, no_refine,
+all: [40]code = [command_line, file_unread, host_refused, no_refine,
                  line_unreadable, keyword_unknown, line_shape, said_twice,
                  package_name, line_missing, not_fetched, rule_runs_nothing,
                  placeholder, name_unknown, steps_circle, input_unknown,
                  step_shadows_path, program_missing, program_unstarted,
-                 step_failed, tree_unhashable, store_unusable, store_nowhere]
+                 step_failed, tree_unhashable, store_unusable, store_nowhere,
+                 lock_missing,
+                 lock_stale,
+                 entry_missing,
+                 package_wrong,
+                 import_undeclared,
+                 tool_wrong,
+                 git_missing,
+                 git_failed,
+                 version_untagged,
+                 tags_differ,
+                 commit_unknown,
+                 tree_differs,
+                 not_a_package,
+                 versions_clash,
+                 locations_clash,
+                 pins_clash,
+                 name_unlocked]
 
 --- How many codes there are.
 public count: () -> (number: usize) =
@@ -105,6 +156,23 @@ public spelled: (which: code) -> (spelling: []u8) =
         tree_unhashable: spelling = "RB0501"
         store_unusable: spelling = "RB0601"
         store_nowhere: spelling = "RB0602"
+        lock_missing: spelling = "RB0204"
+        lock_stale: spelling = "RB0205"
+        entry_missing: spelling = "RB0206"
+        package_wrong: spelling = "RB0207"
+        import_undeclared: spelling = "RB0208"
+        tool_wrong: spelling = "RB0209"
+        git_missing: spelling = "RF0001"
+        git_failed: spelling = "RF0002"
+        version_untagged: spelling = "RF0101"
+        tags_differ: spelling = "RF0102"
+        commit_unknown: spelling = "RF0103"
+        tree_differs: spelling = "RF0104"
+        not_a_package: spelling = "RF0105"
+        versions_clash: spelling = "RF0201"
+        locations_clash: spelling = "RF0202"
+        pins_clash: spelling = "RF0203"
+        name_unlocked: spelling = "RF0204"
     end match
 end spelled
 
@@ -259,6 +327,123 @@ public about: (which: code) -> (words: []u8) =
             variable holds an absolute path, and else
             `$HOME/.cache/landin/store`. Neither variable says where, so
             name the store's directory with `--store PATH`.
+            """
+        lock_missing: words = """
+            The description has a `needs` or `uses` line and the package's
+            directory has no `landin.lock`. The lock says which commit and
+            which content each package is, and `refine-build` builds only
+            from what it says: it fetches nothing. Run `refine-fetch` in the
+            package's directory; it writes the lock and fetches what is
+            missing. Keep the lock with the package's sources.
+            """
+        lock_stale: words = """
+            The lock does not say what the description asks for: a location
+            that has no line, a line whose version is earlier than the one
+            asked for or across a breaking change from it, or another commit
+            than the one named. The description changed after the lock was
+            written. Run `refine-fetch`, which changes the lines that have
+            to change and no others.
+            """
+        entry_missing: words = """
+            The lock names a package whose content is not in the store, as
+            after the lock came from someone else or the store was removed.
+            Run `refine-fetch`: it fetches the commit the lock names and
+            refuses content that is not what the lock says.
+            """
+        package_wrong: words = """
+            A package is not what it was taken for. A local path holds no
+            `landin.package`; two packages in one program have the same
+            name, which only one may have; the content the lock names is
+            described under another name than the lock gives; or a package
+            that was fetched needs a local path, which only the package
+            being built and its local packages may.
+            """
+        import_undeclared: words = """
+            A source file imports a module of a package that the file's own
+            package does not list. A package may import its own modules, the
+            library's (`core`, `hosted`, `platform`, `landin`) and those of
+            the packages its description `needs`; that another package
+            brings one along is not enough, since it may stop doing so. Add
+            a `needs` line for the package, or remove the import. The
+            imports are found by reading each `.ldn` file's lines that start
+            with `import`, not by the compiler.
+            """
+        tool_wrong: words = """
+            A `uses` line names a package that gives the recipe no program:
+            its description has no `program` line. A tool is a package of
+            `kind program` whose programs the tool compiles and the recipe's
+            `run` lines name by their first word.
+            """
+        git_missing: words = """
+            `refine-fetch` fetches with git, which it starts as `git` from
+            PATH, and there is none. Install git. Nothing else fetches: how
+            a location is reached, with which credentials and through which
+            proxy, is all git's configuration.
+            """
+        git_failed: words = """
+            git ended with a status other than 0. What it said is above the
+            message, and the message gives the words it was started with.
+            The usual reasons are a location that does not exist, a host
+            that cannot be reached and credentials git does not have; `git
+            ls-remote https://LOCATION` asks the same of git by hand.
+            """
+        version_untagged: words = """
+            A package is asked for at a version, and the repository at its
+            location has no tag for it. The version `2.3.1` is the tag
+            `v2.3.1` or the tag `2.3.1`. Ask for a version that is tagged,
+            or name a commit: `needs LOCATION commit FORTY-HEX-DIGITS`.
+            """
+        tags_differ: words = """
+            The repository has both the tag `v2.3.1` and the tag `2.3.1`,
+            and they name different commits, so the version means two
+            things. Whoever keeps the repository has to remove one; until
+            then, name the commit you mean.
+            """
+        commit_unknown: words = """
+            A commit named in the description or in the lock is not in the
+            repository at the location, or is on none of its branches and
+            tags, which is all that is fetched. Check the forty digits and
+            the location.
+            """
+        tree_differs: words = """
+            The lock names a commit and the content hash that commit had
+            when the lock was written, and what was fetched for that commit
+            now hashes differently. The content is not what was locked, so
+            it is refused. Nothing a commit's name covers can change, so
+            look for a checkout that differs on this machine: a git filter,
+            or line-end settings. `refine-fetch --update NAME` writes the
+            lock anew from what is there now.
+            """
+        not_a_package: words = """
+            What was fetched has no `landin.package` in its root, or one
+            that cannot be read, so it is no Landin package. The message
+            names the location.
+            """
+        versions_clash: words = """
+            Two packages need one package at versions with a breaking change
+            between them: another major, or below 1.0.0 another minor. A
+            program holds one version of a package, so there is none that
+            serves both. The message names both that ask. One of them has to
+            move to the other's version.
+            """
+        locations_clash: words = """
+            Two locations hold a package of the same name, and a program
+            holds a name once. When the description of the package being
+            built names one of them itself, in a `needs` line, that one is
+            taken for every package and a note says so: that is how a fork
+            stands in for the original. Here it names neither, so add such a
+            line for the one you want.
+            """
+        pins_clash: words = """
+            One package is asked for at a commit by one and at a version, or
+            at another commit, by another, and neither is the package being
+            built, whose choice would stand. Name the commit or the version
+            you want in a `needs` line of the package being built.
+            """
+        name_unlocked: words = """
+            `--update NAME` names a package the lock has no line for. Give
+            the names as the lock spells them, `owner/name`, or no name to
+            choose every package's version anew.
             """
     end match
 end about

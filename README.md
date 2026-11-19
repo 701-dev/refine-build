@@ -72,8 +72,10 @@ package  dev701/refine_build       -- owner/name; both become directories
 kind     program                    -- or library
 licence  MIT
 program  refine-build  cmd/build    -- an executable and the module it starts in
-needs    owner/name  2.3.1          -- another package, and its least version
-uses     owner/name  0.4.0          -- a tool for the recipe
+needs    github.com/owner/name  2.3.1   -- where another package is, and its least version
+needs    github.com/owner/name  commit 4f2a...  -- or the forty digits of a commit
+needs    ../name                    -- or a local directory, taken as it is
+uses     github.com/owner/tool  0.4.0   -- a tool for the recipe, in the same three forms
 ```
 
 `needs` and `uses` are read and checked, and a build with either is

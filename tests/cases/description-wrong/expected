@@ -6,9 +6,15 @@ error[RB0103]: landin.package:6: `licence` takes the licence's name: `licence MI
 error[RB0103]: landin.package:7: a program's name is one word with no `/` in it
 error[RB0103]: landin.package:8: a program's module is a path inside the package, such as `cmd/build`: lowercase letters, digits and `_` between `/`
 error[RB0104]: landin.package:10: the program `x` is named twice; remove one of the lines
-error[RB0103]: landin.package:11: a version is three numbers, `MAJOR.MINOR.PATCH`, such as `2.3.1`
-error[RB0104]: landin.package:13: `dev701/utf8` is listed twice; a package is needed or used once, at one version
-error[RB0201]: landin.package:14: `landin` is the library's own namespace and cannot own a package; choose another owner
-error[RB0102]: landin.package:15: unknown keyword `--comment`; a description line starts with package, kind, licence, program, needs or uses, and a comment with `--` and a space
-error[RB0101]: landin.package:16: a quoted word has no closing quote
+error[RB0103]: landin.package:11: `dev701/utf8` is a package's name and says no place to fetch it from; write the location, as in `needs github.com/dev701/utf8 2.3.1`
+error[RB0103]: landin.package:12: after a location comes a version of three numbers, `MAJOR.MINOR.PATCH`, such as `2.3.1`, or `commit` and forty hexadecimal digits
+error[RB0104]: landin.package:14: `example.test/dev701/utf8` is listed twice; a package is needed or used once
+error[RB0103]: landin.package:15: after a location comes a version, `2.3.1`, or `commit` and the commit's forty hexadecimal digits in lowercase
+error[RB0103]: landin.package:16: `needs` and `uses` take a location and a version, `needs github.com/owner/name 2.3.1`, a location and a commit, `needs github.com/owner/name commit FORTY-HEX-DIGITS`, or a local path, `needs ../name`
+error[RB0103]: landin.package:18: `localhost/x` is a package's name and says no place to fetch it from; write the location, as in `needs github.com/localhost/x 1.0.0`
+error[RB0103]: landin.package:19: a location is a host and a path, such as `github.com/owner/name`: letters, digits, `.`, `_`, `~` and `-` between `/`, no part starting with `-` or `.`, and a `.` in the host
+error[RB0103]: landin.package:20: a location is a host and a path, such as `github.com/owner/name`: letters, digits, `.`, `_`, `~` and `-` between `/`, no part starting with `-` or `.`, and a `.` in the host
+error[RB0103]: landin.package:21: a local path is taken as it is and has no version: `needs ../name`
+error[RB0102]: landin.package:24: unknown keyword `--comment`; a description line starts with package, kind, licence, program, needs or uses, and a comment with `--` and a space
+error[RB0101]: landin.package:25: a quoted word has no closing quote
 [exit 1]

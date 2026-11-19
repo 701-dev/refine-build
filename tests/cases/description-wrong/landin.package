@@ -8,9 +8,18 @@ program a/b cmd/build
 program x Cmd/build
 program x cmd/build
 program x cmd/other
-needs dev701/utf8 2.3
 needs dev701/utf8 2.3.1
-uses  dev701/utf8 1.0.0
-needs landin/x 1.0.0
+needs example.test/dev701/utf8 2.3
+needs example.test/dev701/utf8 2.3.1
+uses  example.test/dev701/utf8 1.0.0
+needs example.test/x commit 0123
+needs example.test/x commit 0123456789abcdef0123456789abcdef01234567 more
+needs example.test/y commit 0123456789abcdef0123456789abcdef01234567
+needs localhost/x 1.0.0
+needs example.test/-x 1.0.0
+needs example.test/a/../b 1.0.0
+needs ../beside 1.0.0
+uses  ../beside
+uses  /somewhere/else
 --comment without a space
 word "open

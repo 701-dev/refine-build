@@ -1,0 +1,108 @@
+-- What the package's programs do the same way: reading the command line,
+-- explaining a code, offering a completion and saying a host's refusal.
+-- `refine-build` and `refine-fetch` are both commands `refine` dispatches
+-- (Landin's D1385, D1387 and D1485), and answer it alike.
+
+import core/failure
+import core/io
+import core/text
+import hosted/blocking
+import dev701/refine_build/codes
+import dev701/refine_build/files
+import dev701/refine_build/lifetime
+import dev701/refine_build/report
+import dev701/refine_build/text/strings
+
+--- The command line is not one the program understands; the status is 2.
+public wrong_usage: atom
+
+--- A copy of the argument at `index`, living as long as `memory`.
+public argument: (host: blocking.host, memory: lifetime.memory, index: usize)
+                 -> (word: []u8) ! report.refused =
+    given: text.host_string = io.argument_at(host, index) else (problem)
+        said(host, problem)
+        fail report.refused
+    end
+    word = strings.keep(memory, text.host_bytes(given)) else (problem)
+        said(host, problem)
+        fail report.refused
+    end
+end argument
+
+--- The word after the option `option`, which is the argument at `at` of
+--- `count`, or said that the option takes a `what`.
+public value: (host: blocking.host, memory: lifetime.memory, at: usize,
+               count: usize, option: []u8, what: []u8)
+              -> (word: []u8) ! report.refused | wrong_usage =
+    if at == count then
+        report.say(host, codes.command_line,
+                   ["`", option, "` takes a value: `", option, " ", what, "`"])
+        fail wrong_usage
+    end if
+    word = try argument(host, memory, at)
+end value
+
+--- `explain CODE` says what the code means; `explain` alone lists the
+--- codes of the package's programs, one a line.  `tool` is the program's
+--- name.  The status is 0, or 2 for a code there is none of.
+public explained: (host: blocking.host, tool: []u8, words: [][]u8)
+                  -> (status: i32) =
+    status = 0
+    if lenof words == 0 then
+        for index in usize(0)..<codes.count() do
+            io.write(host, io.out(host), codes.spelled(codes.at(index)))
+                else none
+            io.write(host, io.out(host), "\n") else none
+        end for
+        return
+    end if
+    which: codes.code = codes.named(words[0]) else (problem)
+        _ = problem
+        report.say(host, codes.command_line,
+                   ["`explain ", words[0], "`: ", tool,
+                    " has no such code; `", tool, " explain` lists its codes"])
+        status = 2
+        return
+    end
+    --  The explanation opens with a line end of its own.
+    io.write(host, io.out(host), codes.spelled(which)) else none
+    io.write(host, io.out(host), codes.about(which)) else none
+end explained
+
+--- Offer every code that starts as `typed` does, for a completion.
+public codes_offered: (host: blocking.host, typed: []u8) -> none =
+    for index in usize(0)..<codes.count() do
+        offered(host, typed, codes.spelled(codes.at(index)))
+    end for
+end codes_offered
+
+--- Print `candidate` when it starts as the word being typed does.
+public offered: (host: blocking.host, typed: []u8, candidate: []u8) -> none =
+    return when not strings.starts(candidate, typed)
+    io.write(host, io.out(host), candidate) else none
+    io.write(host, io.out(host), "\n") else none
+end offered
+
+--- The content of `file`, living as long as `memory`, or said why it
+--- cannot be read; `missing` is what to say when it is not there.
+public content: (host: blocking.host, memory: lifetime.memory, file: []u8,
+                 missing: []u8) -> (source: []u8) ! report.refused =
+    source = files.read_all(host, memory, file) else (problem)
+        if problem == io.not_found then
+            report.at_line(host, codes.file_unread, file, 0, [missing])
+        else
+            report.at_line(host, codes.file_unread, file, 0,
+                           [failure.words(problem)])
+        end if
+        fail report.refused
+    end
+end content
+
+--- Say a problem, unless it is one that was already said.
+public said: (host: blocking.host, problem: failure.reason | report.refused)
+             -> none =
+    match problem
+        report.refused: return
+        _ (rest): report.say(host, codes.host_refused, [failure.words(rest)])
+    end match
+end said

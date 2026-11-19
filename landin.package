@@ -9,5 +9,5 @@ licence  MIT OR Apache-2.0
 program  refine-build  cmd/build
 
 -- Nothing is needed beyond the library that ships with refine.
--- A dependency would read:   needs  owner/name  2.3.1
--- A tool for the recipe:     uses   owner/name  0.4.0
+-- A dependency would read:   needs  github.com/owner/name  2.3.1
+-- A tool for the recipe:     uses   github.com/owner/name  0.4.0
