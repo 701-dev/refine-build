@@ -1,0 +1,44 @@
+-- The content hash of a file: the SHA-256 of its bytes, and how many they
+-- are.  The file is read in blocks and never held whole, so its size does
+-- not show in the memory the tool takes.
+
+import core/io
+import core/text
+import hosted/blocking
+import platform/posix
+import dev701/refine_build/codes
+import dev701/refine_build/hash/sha256
+import dev701/refine_build/report
+
+--- The most bytes one read of a file asks for.
+public block: usize = 32768
+
+--- A file's content: its SHA-256 and how many bytes it is.
+public content: type = (sum: sha256.digest, length: u64)
+
+--- The content of the file at `path`, read `chunk` bytes at a time, or
+--- `block` when `chunk` is 0 or more than it.
+public of: (host: blocking.host, path: []u8, chunk: usize)
+           -> (result: content) ! report.refused =
+    result = zeroed
+    opened: io.file = io.open_read(host, text.host_over(path)) else (problem)
+        report.at_line(host, codes.file_unread, path, 0,
+                       [posix.words(problem)])
+        fail report.refused
+    end
+    defer io.close(host, opened) else none
+    mut room: [block]u8 = zeroed
+    most: usize = if chunk == 0 or chunk > block then block else chunk end if
+    mut running := sha256.start()
+    loop do
+        got: usize = io.read(host, opened, room[0..<most]) else (problem)
+            report.at_line(host, codes.file_unread, path, 0,
+                           [posix.words(problem)])
+            fail report.refused
+        end
+        break when got == 0
+        sha256.add(running, room[0..<got])
+        result.length += u64(got)
+    end loop
+    result.sum = sha256.finish(running)
+end of

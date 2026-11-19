@@ -20,6 +20,11 @@
 #  the dispatcher check runs the tool through `refine` as a contributed
 #  command: a build, help, a forwarded explanation and a completion.
 #
+#  The hash check goes through `--hash-file`, an option for this test
+#  only.  SHA-256 is held to the FIPS 180-4 examples, to lengths around a
+#  block's edges and to `sha256sum` on real files, read in chunks of
+#  several sizes.  It says so when there is no `sha256sum`.
+#
 #  A case is a directory: `command` holds the arguments, one line of plain
 #  words; `expected` what both streams said, then `[exit N]`; `produces`,
 #  when it is there, the files that must exist afterwards.  Each case runs
@@ -172,6 +177,56 @@ if [ -n "$refine" ]; then
     cd "$here"
     [ "$dispatched" = ok ] || failed=$((failed + 1))
 fi
+#  SHA-256, through --hash-file.
+#  sums WHAT FILE EXPECTED [CHUNK]: the tool's hash of FILE is EXPECTED.
+hashes=ok
+sums() {
+    got=$("$build" --hash-file "$2" ${4:+--chunk "$4"} 2>&1) || true
+    if [ "$got" != "$3" ]; then
+        echo "FAILED sha256: $1${4:+ in chunks of $4}: $got, not $3"
+        hashes=no
+    fi
+}
+count=$((count + 1))
+vectors=$scratch/vectors
+mkdir "$vectors"
+: > "$vectors/empty"
+printf 'abc' > "$vectors/abc"
+printf 'abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq' > "$vectors/448"
+printf 'abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu' > "$vectors/896"
+head -c 1000000 /dev/zero | tr '\0' a > "$vectors/million"
+sums "the empty message" "$vectors/empty" \
+    e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+sums "abc" "$vectors/abc" \
+    ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+sums "the 448-bit message" "$vectors/448" \
+    248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1
+sums "the 896-bit message" "$vectors/896" \
+    cf5b16a778af8380036ce59e7b0492370b249b11e8f07a51afac45037afee9d1
+for chunk in "" 63 64 65 4096; do
+    sums "a million a" "$vectors/million" \
+        cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0 "$chunk"
+done
+if command -v sha256sum > /dev/null 2>&1; then
+    #  Around the edges of a block and of the padding: 55 bytes are the
+    #  most that share a block with the length, 64 fill one.
+    for length in 0 1 54 55 56 57 62 63 64 65 119 120 121 127 128 129; do
+        head -c "$length" "$build" > "$vectors/edge"
+        want=$(sha256sum < "$vectors/edge" | cut -d' ' -f1)
+        for chunk in "" 1 3 64; do
+            sums "$length bytes" "$vectors/edge" "$want" "$chunk"
+        done
+    done
+    for real in "$build" "$here/run.sh" "$here/../README.md"; do
+        want=$(sha256sum < "$real" | cut -d' ' -f1)
+        for chunk in "" 61 4096 100000; do
+            sums "$(basename "$real")" "$real" "$want" "$chunk"
+        done
+    done
+else
+    echo "sha256 not compared with sha256sum: there is none"
+fi
+[ "$hashes" = ok ] || failed=$((failed + 1))
 #  peak NAME ARGUMENTS...: the peak resident size, in KiB, of the tool
 #  run in the case NAME with ARGUMENTS.
 peak() {
@@ -199,6 +254,23 @@ steady() {
 if env time -f %M true > /dev/null 2>&1; then
     steady "read and check" steps-run 10 20000 --check
     steady "read, check and run" steps-run 2 200
+    #  A file is hashed in blocks: a large one takes no more memory than a
+    #  small one.
+    count=$((count + 1))
+    mkdir "$scratch/sized"
+    head -c 1048576 /dev/zero > "$scratch/sized/small"
+    head -c 67108864 /dev/zero > "$scratch/sized/large"
+    small=$(peak sized --hash-file small) || small=
+    large=$(peak sized --hash-file large) || large=
+    if [ -z "$small" ] || [ -z "$large" ]; then
+        failed=$((failed + 1))
+    else
+        echo "memory, hashing a file: 1 MiB peaks at $small KiB, 64 MiB at $large KiB"
+        if [ "$large" -gt $((small + slack)) ]; then
+            echo "FAILED memory, hashing a file: memory grows with the file"
+            failed=$((failed + 1))
+        fi
+    fi
 else
     echo "memory check not run: no \`time\` program that takes -f %M"
 fi

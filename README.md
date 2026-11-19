@@ -120,6 +120,8 @@ Everything the tool writes is under `.landin/`.
 | `recipe/` | Reading and checking `landin.recipe`, placeholders, the steps' order. |
 | `steps/` | Views, output directories and running each step's program. |
 | `files/` | Whole files, directory trees, links, and finding a program on PATH. |
+| `hash/sha256/` | SHA-256, on the language alone, so that it can become a library. An integrity hash; it makes no constant-time claim. |
+| `hash/file/` | A file's content hash, read in blocks. |
 | `report/` | What the tool says on standard error. |
 | `tests/` | Small projects and the script that runs the tool over them. |
 | `bootstrap.sh` | Builds the tool by hand. |
@@ -147,6 +149,12 @@ The script also checks memory. It repeats a whole build in one process
 with `--repeat N`, an option for this test only, a few times and many
 times, and fails when the many use more memory than the few. It needs GNU
 `time` and says so when there is none.
+
+SHA-256 is checked through `--hash-file PATH`, one more option for the
+tests only. It is held to the FIPS 180-4 examples, to lengths around a
+block's edges and to `sha256sum` on real files, read in chunks of several
+sizes, and a 64 MiB file may take no more memory than a 1 MiB one. No
+build uses a hash yet.
 
 ## Memory
 
