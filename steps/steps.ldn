@@ -9,7 +9,11 @@
 --
 -- What the tool writes in the project is under `.landin`:
 --
---     .landin/packages/OWNER/NAME     a link to the project itself
+--     .landin/packages/OWNER/NAME     a link to the project itself, and
+--                                     to each package it needs or uses
+--                                     (see `needs.ldn` here)
+--     .landin/tools/OWNER/NAME/view   what a tool's programs were
+--                                     compiled in
 --     .landin/steps/STEP/view         what the step sees
 --     .landin/out/STEP                a link to the entry the step made
 --     .landin/failed/STEP             a link to what a step that failed
@@ -59,6 +63,7 @@ import dev701/refine_build/text/strings
 public request: type = struct
     package_file: []u8
     recipe_file: []u8
+    lock_file: []u8
     refine: []u8
     store: []u8
     again: bool
@@ -85,6 +90,8 @@ shared: type = struct
     packages_sum: sha256.digest
     refine_known: bool
     refine_is: []u8
+    others: []u8
+    tools: vec.list(tool)
 end shared
 
 --- Check what only the project's directory can say: that an input which
@@ -134,10 +141,6 @@ public run: (host: blocking.host, memory: lifetime.memory,
              sequence: []usize) -> none ! report.refused =
     project: []u8 = try here(host, memory)
     work: []u8 = try glued(host, memory, [project, "/.landin"])
-    owned: []u8 = try glued(host, memory, [work, "/packages/", about.owner])
-    try made(host, owned)
-    try linked(host, "../../..",
-               try glued(host, memory, [owned, "/", about.name]))
     try made(host, try glued(host, memory, [work, "/out"]))
     try made(host, try glued(host, memory, [work, "/failed"]))
     changer: []u8 = files.program(host, memory, "env") else (problem)
@@ -171,7 +174,9 @@ public run: (host: blocking.host, memory: lifetime.memory,
                           kept_in: try store.open(host, memory, asked.store),
                           owner: about.owner, name: about.name,
                           packages_known: false, packages_sum: zeroed,
-                          refine_known: false, refine_is: "")
+                          refine_known: false, refine_is: "", others: "",
+                          tools: vec.new(item: tool))
+    try gathered(host, memory, parent, asked, about, common)
     for index in sequence do
         taken: recipe.step = vec.get(plan.steps, index) else (problem)
             gave_up(host, "the recipe", problem)
@@ -224,7 +229,7 @@ run_step: (host: blocking.host, lasting: lifetime.memory,
         gave_up(host, taken.name, problem)
         fail report.refused
     end
-    tool: []u8 = try program(host, memory, asked, taken, view, first)
+    tool: []u8 = try program(host, memory, asked, common, taken, view, first)
     every_time: bool = strings.same(recipe.value_of(how, taken, recipe.always)
                                     else (problem)
         _ = problem
@@ -510,11 +515,18 @@ expanded: (host: blocking.host, memory: lifetime.memory, how: recipe.rule,
     end loop
 end expanded
 
---  The program a `run` line's first word names: the calling `refine`, a
---  path in the step's view, or a program on PATH.
+--  The program a `run` line's first word names: a program of a tool the
+--  package uses, the calling `refine`, a path in the step's view, or a
+--  program on PATH.
 program: (host: blocking.host, memory: lifetime.memory, asked: request,
-          taken: recipe.step, view: []u8, word: []u8)
+          common: shared, taken: recipe.step, view: []u8, word: []u8)
          -> (path: []u8) ! report.refused =
+    for made_tool in vec.used(common.tools) do
+        if strings.same(made_tool.name, word) then
+            path = try glued(host, memory, [made_tool.path])
+            return
+        end if
+    end for
     if strings.same(word, "refine") and lenof asked.refine > 0 then
         path = try glued(host, memory, [asked.refine])
         return

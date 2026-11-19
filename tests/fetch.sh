@@ -168,7 +168,7 @@ if fetched "a chain of three" chain; then
     #  fetched, and it does not change.
     mkdir "$scratch/elsewhere"
     cp "$scratch/chain/landin.package" "$scratch/chain/landin.lock" "$scratch/elsewhere/"
-    refused "--check with an empty store" elsewhere RB0206 --check
+    refused "--check with an empty store" elsewhere RB0205 --check
     if fetched "a fetch into an empty store" elsewhere; then
         run=$((run + 1))
         if ! cmp -s "$scratch/chain.lock" "$scratch/elsewhere/landin.lock"; then
@@ -283,7 +283,7 @@ fi
 library reaching t/reaching 1 "../beside"
 release reaching v1.0.0
 project reached "needs example.test/reaching 1.0.0"
-refused "a fetched package that needs a local path" reached RB0207
+refused "a fetched package that needs a local path" reached RB0206
 
 #  The old form of a needs line says what to write.
 project old "needs t/alpha 1.0.0"
@@ -348,8 +348,191 @@ if env time -f %M true > /dev/null 2>&1; then
     fi
 fi
 
-#  BUILD-CHECKS
-: "$build" "$refine"
+#  Building with what was fetched.  adder needs alpha and imports it;
+#  the program needs adder and alpha, at an earlier version than adder
+#  does, and ends with what the two give: 2 from alpha 1.2.0, twice.
+repo adder
+printf 'package t/adder\nkind library\nneeds example.test/alpha 1.2.0\n' \
+    > "$scratch/repos/adder/landin.package"
+mkdir -p "$scratch/repos/adder/adder"
+printf 'import t/alpha/part\n\npublic plus: (n: i32) -> (r: i32) =\n    r = n + part.value()\nend plus\n' \
+    > "$scratch/repos/adder/adder/adder.ldn"
+release adder v1.0.0
+#  program NAME IMPORTS RESULT LINES...: a package directory with a program
+#  whose `main` imports IMPORTS, a `;`-separated list, and ends with
+#  RESULT, and a description with LINES.
+program() {
+    name=$1 imports=$2 result=$3
+    shift 3
+    mkdir -p "$scratch/$name/cmd/app"
+    {
+        echo "package test/$name"
+        echo "kind program"
+        echo "program app cmd/app"
+        for line in "$@"; do echo "$line"; done
+    } > "$scratch/$name/landin.package"
+    {
+        echo "$imports" | tr ';' '\n' | sed 's/^/import /'
+        echo
+        echo 'public main: () -> (code: i32) ='
+        echo "    code = $result"
+        echo 'end main'
+    } > "$scratch/$name/cmd/app/main.ldn"
+}
+#  built WHAT PROJECT [ARGUMENTS...]: the build there ends with 0; its
+#  output is in $scratch/said.
+built() {
+    what=$1 name=$2
+    shift 2
+    run=$((run + 1))
+    if ! (cd "$scratch/$name" && "$build" --refine "$refine" \
+        --store "$scratch/store-$name" "$@" > "$scratch/said" 2>&1); then
+        cat "$scratch/said"
+        echo "FAILED build: $what: the build failed"
+        failed=$((failed + 1))
+        return 1
+    fi
+}
+#  unbuilt WHAT PROJECT CODE: the build there ends with 1 and says CODE.
+unbuilt() {
+    run=$((run + 1))
+    status=0
+    (cd "$scratch/$2" && "$build" --refine "$refine" \
+        --store "$scratch/store-$2" > "$scratch/said" 2>&1) || status=$?
+    if [ "$status" -ne 1 ] || ! grep -q "^error\\[$3\\]: " "$scratch/said"; then
+        cat "$scratch/said"
+        echo "FAILED build: $1: not refused with $3"
+        failed=$((failed + 1))
+    fi
+}
+#  ends WHAT PROGRAM STATUS: PROGRAM ends with STATUS.
+ends() {
+    run=$((run + 1))
+    status=0
+    "$2" || status=$?
+    if [ "$status" -ne "$3" ]; then
+        echo "FAILED build: $1: ended with $status, not $3"
+        failed=$((failed + 1))
+    fi
+}
+compile='    run refine compile --root packages packages/test/NAME/cmd/app -o {out}/app'
+program uses2 "t/adder/adder;t/alpha/part" "adder.plus(part.value())" \
+    "needs example.test/adder 1.0.0" "needs example.test/alpha 1.0.0"
+printf 'step app with packages\n%s\n' "$compile" | sed 's/NAME/uses2/' > "$scratch/uses2/landin.recipe"
+unbuilt "a build with needs and no lock" uses2 RB0203
+holds "the refusal says what to run" 'run `refine fetch`' "$scratch/said"
+if fetched "what the program needs" uses2 && built "a program with two packages" uses2; then
+    ends "the program takes alpha at the later version, through both" "$scratch/uses2/.landin/out/app/app" 4
+    built "a second build with packages" uses2 || true
+    holds "a second build with packages keeps the step" '^step app: kept$' "$scratch/said"
+    #  The store elsewhere lacks the entries: the build says to fetch.
+    mkdir "$scratch/moved"
+    cp -R "$scratch/uses2/cmd" "$scratch/uses2/landin.package" "$scratch/uses2/landin.recipe" \
+        "$scratch/uses2/landin.lock" "$scratch/moved/"
+    unbuilt "a build whose store lacks a locked package" moved RB0205
+    #  The description asks for more than the lock gives.
+    sed -i 's/alpha 1\.0\.0/alpha 2.0.0/' "$scratch/moved/landin.package"
+    rm -rf "$scratch/store-moved"
+    cp -R "$scratch/store-uses2" "$scratch/store-moved"
+    unbuilt "a build whose lock is behind the description" moved RB0204
+fi
+#  An import of a package that is only brought along is refused.
+program leaning "t/adder/adder;t/alpha/part" "adder.plus(part.value())" \
+    "needs example.test/adder 1.0.0"
+printf 'step app with packages\n%s\n' "$compile" | sed 's/NAME/leaning/' > "$scratch/leaning/landin.recipe"
+if fetched "what the leaning program needs" leaning; then
+    unbuilt "an import of a package that is not listed" leaning RB0207
+    holds "the import's file and line are named" \
+        '^error\[RB0207\]: cmd/app/main\.ldn:2: `import t/alpha/part` is a module of `t/alpha`' "$scratch/said"
+fi
+#  A local package is built with, as it is, and an edit to it is seen.
+program nearby "t/beside/part" "part.value()" "needs ../beside"
+printf 'step app with packages\n%s\n' "$compile" | sed 's/NAME/nearby/' > "$scratch/nearby/landin.recipe"
+if fetched "what the local package needs" nearby && built "a program with a local package" nearby; then
+    ends "the local package's module is used" "$scratch/nearby/.landin/out/app/app" 41
+    sed -i 's/+ 40/+ 50/' "$scratch/beside/part/part.ldn"
+    built "a build after the local package changed" nearby || true
+    holds "an edit to a local package runs the step" '^step app$' "$scratch/said"
+    ends "the edit is in the program" "$scratch/nearby/.landin/out/app/app" 51
+fi
+
+#  A tool: a package the description uses, whose program writes a module
+#  that a later step compiles with.
+repo gen
+mkdir -p "$scratch/repos/gen/cmd/gen"
+printf 'package t/gen\nkind program\nprogram gen cmd/gen\n' > "$scratch/repos/gen/landin.package"
+cat > "$scratch/repos/gen/cmd/gen/main.ldn" <<'END'
+-- gen DIRECTORY... FILE: makes the directories and writes a module to FILE.
+
+import core/io
+import core/text
+import hosted/blocking
+
+public main: () -> (code: i32) =
+    host := blocking.new()
+    code = 1
+    count: usize = io.argument_count(host)
+    return when count == 0
+    for at in usize(0)..<count - 1 do
+        made: text.host_string = io.argument_at(host, at) else (problem)
+            _ = problem
+            return
+        end
+        io.make_directory(host, made) else (problem)
+            _ = problem
+            return
+        end
+    end for
+    path: text.host_string = io.argument_at(host, count - 1) else (problem)
+        _ = problem
+        return
+    end
+    written: io.file = io.open_write(host, path) else (problem)
+        _ = problem
+        return
+    end
+    io.write(host, written, "public value: () -> (n: i32) =\n    n = 30\nend value\n") else none
+    io.close(host, written) else none
+    io.write(host, io.out(host), "generated\n") else none
+    code = 0
+end main
+END
+release gen v1.0.0
+program tooled "test/tooled/generated" "generated.value()" "uses example.test/gen 1.0.0"
+cat > "$scratch/tooled/landin.recipe" <<'END'
+step made
+    run gen {out}/test {out}/test/tooled {out}/test/tooled/generated {out}/test/tooled/generated/generated.ldn
+step app with packages made
+    run refine compile --root packages --root made packages/test/tooled/cmd/app -o {out}/app
+END
+if fetched "the tool" tooled; then
+    holds "a package that is only used is a tool in the lock" '^tool t/gen example\.test/gen 1\.0\.0 ' "$scratch/tooled/landin.lock"
+    if built "a recipe that runs a tool" tooled; then
+        holds "the tool is made first" '^tool t/gen$' "$scratch/said"
+        ends "the generated module is in the program" "$scratch/tooled/.landin/out/app/app" 30
+        built "a second build with a tool" tooled || true
+        run=$((run + 1))
+        if [ "$(cat "$scratch/said")" != "tool t/gen: kept
+step made: kept
+generated
+step app: kept" ]; then
+            cat "$scratch/said"
+            echo "FAILED build: a second build does not keep the tool and both steps"
+            failed=$((failed + 1))
+        fi
+        #  The package being built changed: the tool is not made again.
+        echo '-- a note' >> "$scratch/tooled/cmd/app/main.ldn"
+        built "a build after the program changed" tooled || true
+        holds "a change to the package keeps the tool" '^tool t/gen: kept$' "$scratch/said"
+        holds "a change to the package runs its step" '^step app$' "$scratch/said"
+    fi
+fi
+#  A package that is used and gives no program.
+program toolless "core/io" "0" "uses example.test/alpha 1.0.0"
+printf 'step app with packages\n%s\n' "$compile" | sed 's/NAME/toolless/' > "$scratch/toolless/landin.recipe"
+if fetched "a library that is used" toolless; then
+    unbuilt "a tool with no program" toolless RB0208
+fi
 
 echo "fetch checks: $run run, $failed failed"
 [ "$failed" -eq 0 ]

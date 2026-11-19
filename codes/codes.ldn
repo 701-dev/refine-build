@@ -24,7 +24,6 @@ public line_shape: atom
 public said_twice: atom
 public package_name: atom
 public line_missing: atom
-public not_fetched: atom
 public rule_runs_nothing: atom
 public placeholder: atom
 public name_unknown: atom
@@ -59,7 +58,7 @@ public name_unlocked: atom
 public code: type =
     command_line | file_unread | host_refused | no_refine | line_unreadable |
     keyword_unknown | line_shape | said_twice | package_name | line_missing |
-    not_fetched | rule_runs_nothing | placeholder | name_unknown |
+    rule_runs_nothing | placeholder | name_unknown |
     steps_circle | input_unknown | step_shadows_path | program_missing |
     program_unstarted | step_failed | tree_unhashable | store_unusable |
     store_nowhere |
@@ -85,9 +84,9 @@ public code: type =
 public unknown: atom
 
 --- Every code, in the order `refine-build explain` lists them.
-all: [40]code = [command_line, file_unread, host_refused, no_refine,
+all: [39]code = [command_line, file_unread, host_refused, no_refine,
                  line_unreadable, keyword_unknown, line_shape, said_twice,
-                 package_name, line_missing, not_fetched, rule_runs_nothing,
+                 package_name, line_missing, rule_runs_nothing,
                  placeholder, name_unknown, steps_circle, input_unknown,
                  step_shadows_path, program_missing, program_unstarted,
                  step_failed, tree_unhashable, store_unusable, store_nowhere,
@@ -143,7 +142,6 @@ public spelled: (which: code) -> (spelling: []u8) =
         said_twice: spelling = "RB0104"
         package_name: spelling = "RB0201"
         line_missing: spelling = "RB0202"
-        not_fetched: spelling = "RB0203"
         rule_runs_nothing: spelling = "RB0301"
         placeholder: spelling = "RB0302"
         name_unknown: spelling = "RB0303"
@@ -156,12 +154,12 @@ public spelled: (which: code) -> (spelling: []u8) =
         tree_unhashable: spelling = "RB0501"
         store_unusable: spelling = "RB0601"
         store_nowhere: spelling = "RB0602"
-        lock_missing: spelling = "RB0204"
-        lock_stale: spelling = "RB0205"
-        entry_missing: spelling = "RB0206"
-        package_wrong: spelling = "RB0207"
-        import_undeclared: spelling = "RB0208"
-        tool_wrong: spelling = "RB0209"
+        lock_missing: spelling = "RB0203"
+        lock_stale: spelling = "RB0204"
+        entry_missing: spelling = "RB0205"
+        package_wrong: spelling = "RB0206"
+        import_undeclared: spelling = "RB0207"
+        tool_wrong: spelling = "RB0208"
         git_missing: spelling = "RF0001"
         git_failed: spelling = "RF0002"
         version_untagged: spelling = "RF0101"
@@ -180,10 +178,10 @@ end spelled
 public about: (which: code) -> (words: []u8) =
     match which
         command_line: words = """
-            The command line is not one refine-build understands: an option
+            The command line is not one the program understands: an option
             it does not have, an option without its value, or a code that
-            `explain` does not know. `refine-build --help` lists the
-            options. The status is 2.
+            `explain` does not know. `refine-build --help` and
+            `refine-fetch --help` list the options. The status is 2.
             """
         file_unread: words = """
             A file the build needs is not there or cannot be read.
@@ -244,12 +242,6 @@ public about: (which: code) -> (words: []u8) =
             The description lacks a line it needs: `package owner/name`,
             which every description has, or, for `kind program`, a
             `program NAME MODULE` line for each executable.
-            """
-        not_fetched: words = """
-            The description has a `needs` or `uses` line. Both are read and
-            checked, and this refine-build fetches no package yet, so a
-            step would not find it in `packages`. `--check` still reads the
-            files; to build, remove the line.
             """
         rule_runs_nothing: words = """
             A rule has no `run` line, so a step that names it would start

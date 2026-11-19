@@ -23,6 +23,10 @@
 --               `.landin`, `.git`, `.hg`, `.svn` and `.jj` in its root
 --         `a`   after the `h` of `packages` only: the package's
 --               OWNER/NAME, which is where the view shows it
+--         `d`   after that `a`: for every other package in `packages`,
+--               in the order of their names, OWNER/NAME, a space, the 64
+--               hexadecimal digits of its tree hash and a line feed; no
+--               bytes when there is none
 --
 -- What a program is, the `p` field:
 --
@@ -100,6 +104,7 @@ key_of: (host: blocking.host, memory: lifetime.memory,
             holds(running, u8('p'), common.packages_sum)
             field(running, u8('a'),
                   try glued(host, memory, [common.owner, "/", common.name]))
+            field(running, u8('d'), common.others)
             continue
         end if
         index: usize = recipe.step_named(plan, name) else (problem)

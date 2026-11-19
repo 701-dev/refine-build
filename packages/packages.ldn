@@ -9,6 +9,7 @@
 
 import core/failure
 import core/io
+import core/region
 import core/vec
 import hosted/blocking
 import dev701/refine_build/codes
@@ -380,3 +381,151 @@ glued: (host: blocking.host, memory: lifetime.memory, parts: [][]u8)
         fail report.refused
     end
 end glued
+
+--- Check the imports of the package in `project`, called `own`, and of
+--- every package of `found`: a source file may import its own package's
+--- modules, the library's, and those of the packages its package's
+--- description `needs`.  The imports are read from each `.ldn` file's
+--- lines that start with `import`; this is a scan, not the compiler's
+--- view.  A directory that holds a `landin.package` of its own is another
+--- package and is not looked into.  Every breach is said, with its file
+--- and line, and then the check fails.
+public imports_checked: (host: blocking.host, parent: lifetime.parent,
+                         found: set, project: []u8, own: []u8)
+                        -> none ! report.refused =
+    mut wrong: bool = false
+    try one_checked(host, parent, found, project, project, own,
+                    vec.used(found.needs), wrong)
+    for item in vec.used(found.all) do
+        try one_checked(host, parent, found, "", item.path, item.name,
+                        vec.used(item.needs), wrong)
+    end for
+    fail report.refused when wrong
+end imports_checked
+
+--  Check the package `own` in `root`, which needs the packages at `needs`
+--  of the set.  The paths it looks at live in a region of its own.
+one_checked: (host: blocking.host, parent: lifetime.parent, found: set,
+              shown_from: []u8, root: []u8, own: []u8, needs: []usize,
+              inout wrong: bool) -> none ! report.refused =
+    mut ledger: lifetime.ledger = zeroed
+    memory := region.over(ledger, parent)
+    defer region.release(ledger, parent)
+    try walked(host, memory, found, shown_from, root, true, own, needs,
+               wrong)
+end one_checked
+
+--  The library's and the toolchain's namespaces, which anything imports.
+namespaces: [4][]u8 = ["core", "hosted", "platform", "landin"]
+
+--  Look at every `.ldn` file under `directory`, which is the package's
+--  root when `top`.  A path under `shown_from`, when that is not empty,
+--  is said without it.
+walked: (host: blocking.host, memory: lifetime.memory, found: set,
+         shown_from: []u8, directory: []u8, top: bool, own: []u8,
+         needs: []usize, inout wrong: bool) -> none ! report.refused =
+    names: vec.list([]u8) = files.held(host, memory, directory) else (problem)
+        gave_up(host, directory, problem)
+        fail report.refused
+    end
+    for below in vec.used(names) do
+        mut cut: usize = lenof below
+        while cut > 0 and below[cut - 1] <> u8('/') do dec cut end while
+        base: []u8 = below[cut..<lenof below]
+        kind: files.found = files.kind_of(host, below) else (problem)
+            gave_up(host, below, problem)
+            fail report.refused
+        end
+        if kind == io.subdirectory then
+            mut left: bool = false
+            if top then
+                for name in left_out do
+                    if strings.same(name, base) then left = true end if
+                end for
+            end if
+            continue when left
+            inner: []u8 = try glued(host, memory, [below, "/", package_file])
+            other: files.found = files.kind_of(host, inner) else (problem)
+                gave_up(host, inner, problem)
+                fail report.refused
+            end
+            continue when other <> files.absent
+            try walked(host, memory, found, shown_from, below, false, own,
+                       needs, wrong)
+        elsif kind == io.regular and lenof base > 4
+          and strings.same(base[lenof base - 4..<lenof base], ".ldn") then
+            try scanned(host, memory, found, shown_from, below, own, needs,
+                        wrong)
+        end if
+    end for
+end walked
+
+--  Check the `import` lines of the source file at `path`.
+scanned: (host: blocking.host, memory: lifetime.memory, found: set,
+          shown_from: []u8, path: []u8, own: []u8, needs: []usize,
+          inout wrong: bool) -> none ! report.refused =
+    source: []u8 = files.read_all(host, memory, path) else (problem)
+        report.at_line(host, codes.file_unread, path, 0,
+                       [failure.words(problem)])
+        fail report.refused
+    end
+    mut shown: []u8 = path
+    if lenof shown_from > 0 and strings.starts(path, shown_from)
+      and lenof path > lenof shown_from + 1 then
+        shown = path[lenof shown_from + 1..<lenof path]
+    end if
+    mut at: usize = 0
+    mut number: usize = 1
+    while at < lenof source do
+        rest: []u8 = source[at..<lenof source]
+        stop: usize = strings.find(rest, u8('\n'))
+        mut line: []u8 = rest[0..<stop]
+        at += stop + 1
+        this: usize = number
+        inc number
+        while lenof line > 0 and (line[0] == u8(' ') or line[0] == u8('\t')) do
+            line = line[1..<lenof line]
+        end while
+        continue when not strings.starts(line, "import ")
+        line = line[7..<lenof line]
+        while lenof line > 0 and line[0] == u8(' ') do
+            line = line[1..<lenof line]
+        end while
+        mut ending: usize = 0
+        while ending < lenof line and line[ending] <> u8(' ')
+          and line[ending] <> u8('\t') and line[ending] <> u8('\r') do
+            inc ending
+        end while
+        module: []u8 = line[0..<ending]
+        first: usize = strings.find(module, u8('/'))
+        mut ours: bool = false
+        for name in namespaces do
+            if strings.same(name, module[0..<first]) then ours = true end if
+        end for
+        continue when ours
+        if first == lenof module then
+            report.at_line(host, codes.import_undeclared, shown, this,
+                           ["`import ", module, "` in the package `", own,
+                            "` names no package; an import is the library's, `core/...`, or a package's module, `owner/name/...`"])
+            wrong = true
+            continue
+        end if
+        after: []u8 = module[first + 1..<lenof module]
+        second: usize = first + 1 + strings.find(after, u8('/'))
+        package_name: []u8 = module[0..<second]
+        mut listed_one: bool = strings.same(own, package_name)
+        all: []package = vec.used(found.all)
+        for index in needs do
+            if strings.same(all[index].name, package_name) then
+                listed_one = true
+            end if
+        end for
+        continue when listed_one
+        report.at_line(host, codes.import_undeclared, shown, this,
+                       ["`import ", module, "` is a module of `",
+                        package_name, "`, which the package `", own,
+                        "` does not list; add a `needs` line for it to the ",
+                        package_file, " of `", own, "`, or remove the import"])
+        wrong = true
+    end while
+end scanned

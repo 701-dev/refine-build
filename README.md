@@ -10,8 +10,9 @@ contributed command of `refine`: on PATH as `refine-NAME`, it runs as
 **Status: a prototype.** `refine-build` reads and checks both files, runs
 steps one after another and keeps what each made in a store, so a step
 whose program and inputs are what they were is not run again.
-`refine-fetch` fetches with git and writes `landin.lock`. A build does not
-yet use what was fetched: one of a package with `needs` or `uses` is refused.
+`refine-fetch` fetches with git and writes `landin.lock`, and a build takes
+the packages the lock names from the store and compiles the tools the
+description uses.
 
 ## Building it
 
@@ -124,6 +125,47 @@ and dropped, each with its version, location, size and licence.
   They have no line in the lock; what they need has.
 - **Tools.** A `uses` line is fetched like a `needs` line.
 
+## Building with other packages
+
+`refine-build` fetches nothing. When the description has `needs` or `uses`
+lines it reads `landin.lock` and takes each package from the store, or from
+its local path. Without a lock, with one that does not give what the
+description asks for, or with a store that lacks what the lock names, it
+refuses and says to run `refine fetch`.
+
+- **`packages`**, the input, then holds this package and every other one,
+  each at its `owner/name`: a link to the project, to an entry of the
+  store, or to a local directory. A step's key covers each one's content,
+  so an edit to a local package runs the steps that take `packages`.
+- **Imports are held to the description.** Before any step runs, every
+  package's source files are read for lines that start with `import`. A
+  file may import its own package's modules, the library's (`core`,
+  `hosted`, `platform`, `landin`) and those of the packages its own
+  description `needs`. A package that another one merely brings along is
+  refused, with the file and the line, since it may stop being brought.
+  This is a scan of the lines, not the compiler's view: it does not know
+  which files a program takes in, and a line of a text literal that starts
+  with `import` is taken for one. A directory with a `landin.package` of
+  its own is another package and is not read.
+- **Tools.** For each package the description `uses`, the programs its
+  description names are compiled, with the refine that `run refine` means,
+  into one entry of the store, and a `run` line names one by its first
+  word. The tool is made again when it, a package it needs or refine
+  changed, and not when the package being built did. Only the tools of the
+  package being built are made; a tool's own `uses` are not.
+
+A recipe that makes a module with a tool and compiles with it:
+
+```
+step made
+    run gen {out}/owner {out}/owner/name {out}/owner/name/generated {out}/owner/name/generated/generated.ldn
+step app with packages made
+    run refine compile --root packages --root made packages/owner/name/cmd/app -o {out}/app
+```
+
+The module is written under the package's own `owner/name`, so
+`import owner/name/generated` is an import of the package itself.
+
 ### The lock: `landin.lock`
 
 ```
@@ -209,7 +251,8 @@ In the project, everything the tool writes is under `.landin/`:
 | `.landin/out/STEP` | A link to what the step made, in the store. |
 | `.landin/steps/STEP/view` | What the step's program saw. |
 | `.landin/failed/STEP` | A link to what a step wrote before it failed, until it runs again. |
-| `.landin/packages` | This package under its `owner/name`. |
+| `.landin/packages` | This package and every one it needs or uses, each under its `owner/name`. Made anew by every build. |
+| `.landin/tools/OWNER/NAME/view` | What a tool's programs were compiled in. |
 
 ## The store
 
@@ -266,7 +309,7 @@ entries are read-only: `chmod -R u+w` it first.
 | `lifetime/` | How long memory lives: the regions of the process, one build and one step. |
 | `description/` | Reading and checking `landin.package`. |
 | `recipe/` | Reading and checking `landin.recipe`, placeholders, the steps' order. |
-| `steps/` | Views, a step's key, running its program, passing on what it says, and keeping or taking what the store has. |
+| `steps/` | Views, a step's key, running its program, passing on what it says, keeping or taking what the store has, and what a build takes from other packages: `packages`, the import check, the tools. |
 | `store/` | The store: entries by content, keys, and the lock. |
 | `files/` | Whole files, directory trees, links, and finding a program on PATH. |
 | `hash/sha256/` | SHA-256, on the language alone, so that it can become a library. An integrity hash; it makes no constant-time claim. |
@@ -316,7 +359,13 @@ three packages, one package asked for at two versions, a breaking change
 between two, both spellings of a tag and the two at different commits, a
 commit named itself, a tag that moved, content that is not the lock's, a
 fork standing in, a local path, a lock that is right left byte for byte,
-`--update`, `--check`, and the command through `refine fetch`.
+`--update`, `--check`, and the command through `refine fetch`. Then it
+builds with what was fetched: a program with two packages, one of them
+asked for at two versions; a build without a lock, with a store that lacks
+a package and with a lock behind the description, each refused; an import
+of a package that is not listed; a local package and an edit to it; and a
+tool whose program writes a module that a later step compiles with, kept
+on a second build and when only the package being built changed.
 
 The script also checks memory. It repeats a whole build in one process
 with `--repeat N`, an option for this test only, a few times and many
@@ -373,8 +422,15 @@ process, as a watch mode will, without the memory in use growing.
     whole;
   - a file the program reads outside its view has changed.
   `--again` runs everything.
-- `packages` is the whole checkout, so an edit to any file of it, a README
-  included, runs every step that takes `packages`.
+- `packages` is the whole checkout and every other package, so an edit to
+  any file of it, a README included, runs every step that takes `packages`.
+- Every package of a program is in one `packages`, a tool's among them, so
+  a package and a tool cannot need two versions of one name, though they
+  are different programs.
+- A tool's programs are found by their names, before PATH. Two tools with
+  a program of one name are not told apart: the later `uses` line wins.
+- Only git is fetched from, over `https://`; a commit has to be on a
+  branch or a tag to be found. Nothing is vendored into the project.
 - Two builds at once in one project directory are not guarded against each
   other: they share `.landin/`. Two projects on one store are.
 - Nothing removes what the store no longer needs, nor what a build that was
@@ -393,6 +449,10 @@ run in this directory, does that stage's part of the two files:
    giving the same `refine-build` that `bootstrap.sh` gives. **Done.**
 3. Keeps each step's output in a store keyed by its inputs, so a second run
    does nothing. **Done.**
+4. Fetches what a description needs and writes the lock; builds with it.
+   **Done**, though this package itself needs nothing yet: the checks in
+   `tests/fetch.sh` are its users until the shared modules here become
+   packages of their own.
 
 ## Licence
 

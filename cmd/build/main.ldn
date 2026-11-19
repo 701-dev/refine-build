@@ -54,6 +54,7 @@ import dev701/refine_build/text/strings
 
 package_file: []u8 = "landin.package"
 recipe_file: []u8 = "landin.recipe"
+lock_file: []u8 = "landin.lock"
 missing: []u8 = "not found; run refine-build in a package's directory, which holds its landin.package and landin.recipe"
 
 usage: []u8 = """usage: refine-build [--refine PATH] [--store PATH] [--again] [--raw]
@@ -184,6 +185,7 @@ build: (host: blocking.host, parent: lifetime.parent, asked: options)
         end
     request: steps.request = (package_file: package_file,
                               recipe_file: recipe_file,
+                              lock_file: lock_file,
                               refine: asked.refine, store: asked.store,
                               again: asked.again, raw: asked.raw)
     try steps.fits(host, parent, request, plan)
@@ -209,18 +211,6 @@ build: (host: blocking.host, parent: lifetime.parent, asked: options)
         end for
     end if
     return when asked.check_only
-    for wanted in vec.used(about.needs) do
-        report.at_line(host, codes.not_fetched, package_file, wanted.number,
-                       ["`needs ", wanted.place,
-                        "` is read and checked, but this refine-build fetches no package yet, so a step would not find it; remove the line to build"])
-        fail report.refused
-    end for
-    for wanted in vec.used(about.uses) do
-        report.at_line(host, codes.not_fetched, package_file, wanted.number,
-                       ["`uses ", wanted.place,
-                        "` is read and checked, but this refine-build fetches no tool yet; remove the line to build"])
-        fail report.refused
-    end for
     sequence: vec.list(usize) =
         recipe.order(memory, plan, vec.used(targets)) else (problem)
             command.said(host, problem)

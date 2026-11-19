@@ -1,0 +1,278 @@
+-- What a build takes from other packages.
+--
+-- The packages the description `needs` and `uses` are those the lock
+-- names, as the store holds them, and those in local paths (see
+-- `packages`); nothing here fetches.  `.landin/packages` is made anew for
+-- every build: this package under its OWNER/NAME, a link to the project,
+-- and every other under its own, a link to its entry in the store or to
+-- its local directory.  That directory is what the input `packages` is.
+--
+-- Before any step runs, each package's imports are held to what its
+-- description lists (see `packages.imports_checked`).
+--
+-- A package the description `uses` is a tool: the programs its
+-- description names are compiled here, with the refine a `run refine`
+-- line means, into one entry of the store, and a `run` line names one by
+-- its first word.  Only the tools of the package being built are made,
+-- and a tool's own `uses` are not.  The entry is kept under the SHA-256
+-- of this byte string, in fields as a step's key has them (see
+-- `keys.ldn` here):
+--
+--     the 14 bytes `landin-tool-1` and a line feed
+--     `p`   what refine is, as in a step's key
+--     `a`   for the tool and each package it needs, directly or through
+--           another, in the order of their names: OWNER/NAME, a space and
+--           the 64 hexadecimal digits of its tree hash
+--     `w`   for each program, in the description's order: its name, and
+--           then the module it starts in
+--
+-- So a tool is compiled again when it, something it needs or refine
+-- changed, and not when the package being built did.
+
+import core/io
+import core/region
+import core/sort
+import core/vec
+import hosted/blocking
+import dev701/refine_build/codes
+import dev701/refine_build/command
+import dev701/refine_build/description
+import dev701/refine_build/files
+import dev701/refine_build/hash/sha256
+import dev701/refine_build/lifetime
+import dev701/refine_build/lock
+import dev701/refine_build/packages
+import dev701/refine_build/recipe
+import dev701/refine_build/report
+import dev701/refine_build/store
+import dev701/refine_build/text/strings
+
+--  A program a tool gives the recipe: the first word that names it, and
+--  the file it is.
+tool: type = struct
+    name: []u8
+    path: []u8
+end tool
+
+--  The form's name, which every tool key's byte string starts with.
+tool_form: []u8 = "landin-tool-1\n"
+
+--  Find the packages of the build, make `.landin/packages`, check the
+--  imports and make the tools.  What the steps need of it is noted in
+--  `common` and lives as long as `lasting`.
+gathered: (host: blocking.host, lasting: lifetime.memory,
+           parent: lifetime.parent, asked: request,
+           about: description.description, inout common: shared)
+          -> none ! report.refused =
+    mut ledger: lifetime.ledger = zeroed
+    memory := region.over(ledger, parent)
+    defer region.release(ledger, parent)
+    mut found: packages.set = packages.none_needed()
+    if vec.length(about.needs) + vec.length(about.uses) > 0 then
+        source: []u8 = files.read_all(host, memory, asked.lock_file)
+            else (problem)
+            if problem == io.not_found then
+                report.at_line(host, codes.lock_missing, asked.lock_file, 0,
+                               ["not found, and ", asked.package_file,
+                                " has `needs` or `uses` lines; refine-build fetches nothing, so run `refine fetch`, the program `refine-fetch`, in this directory first"])
+            else
+                gave_up(host, asked.lock_file, problem)
+            end if
+            fail report.refused
+        end
+        locks: lock.lock = lock.read(host, memory, asked.lock_file, source)
+            else (problem)
+            command.said(host, problem)
+            fail report.refused
+        end
+        found = try packages.locked(host, memory, parent, common.kept_in,
+                                    common.project, asked.lock_file, about,
+                                    locks)
+    end if
+    own: []u8 = try glued(host, memory, [common.owner, "/", common.name])
+    held_in: []u8 = try glued(host, memory, [common.work, "/packages"])
+    files.remove_all(host, memory, held_in) else (problem)
+        gave_up(host, held_in, problem)
+        fail report.refused
+    end
+    try made(host, try glued(host, memory, [held_in, "/", common.owner]))
+    try linked(host, "../../..", try glued(host, memory, [held_in, "/", own]))
+    mut lines := vec.new(item: []u8)
+    for item in vec.used(found.all) do
+        if strings.same(item.name, own) then
+            report.say(host, codes.package_wrong,
+                       ["the package at `", item.path, "` is called `", own,
+                        "`, as the package being built is; a program holds a name once"])
+            fail report.refused
+        end if
+        cut: usize = strings.find(item.name, u8('/'))
+        try made(host, try glued(host, memory,
+                                 [held_in, "/", item.name[0..<cut]]))
+        try linked(host, item.path,
+                   try glued(host, memory, [held_in, "/", item.name]))
+        line: []u8 = try glued(host, memory, [item.name, " ", item.tree, "\n"])
+        vec.push(lines, memory, line) else (problem)
+            gave_up(host, item.name, problem)
+            fail report.refused
+        end
+    end for
+    order: usize = 0
+    sort.sort_by(vec.used(lines), order, earlier)
+    mut others: []u8 = ""
+    for line in vec.used(lines) do
+        others = try glued(host, memory, [others, line])
+    end for
+    common.others = try glued(host, lasting, [others])
+    try packages.imports_checked(host, parent, found, common.project, own)
+    for index in vec.used(found.uses) do
+        try tool_made(host, lasting, parent, asked, common, found, index)
+    end for
+end gathered
+
+--  Make the programs of the tool at `index` of `found`, or take what the
+--  store keeps of them, and note them in `common`.
+tool_made: (host: blocking.host, lasting: lifetime.memory,
+            parent: lifetime.parent, asked: request, inout common: shared,
+            found: packages.set, index: usize) -> none ! report.refused =
+    mut ledger: lifetime.ledger = zeroed
+    memory := region.over(ledger, parent)
+    defer region.release(ledger, parent)
+    all: []packages.package = vec.used(found.all)
+    item: packages.package = all[index]
+    programs: []description.program = vec.used(item.about.programs)
+    if lenof programs == 0 then
+        report.say(host, codes.tool_wrong,
+                   ["`", item.name, "`, which ", asked.package_file,
+                    " uses, has no `program` line, so it gives the recipe nothing to run"])
+        fail report.refused
+    end if
+    --  A step to speak of: what is said of a tool's programs names it.
+    spoken: recipe.step = (name: try glued(host, memory, ["uses ", item.name]),
+                           number: 0, own: true, rule_name: "", rule_at: 0,
+                           direct: vec.new(item: []u8),
+                           beside: vec.new(item: []u8),
+                           sets: vec.new(item: recipe.setting))
+    home: []u8 = try glued(host, memory, [common.work, "/tools/", item.name])
+    view: []u8 = try glued(host, memory, [home, "/view"])
+    refine: []u8 = try program(host, memory, asked, common, spoken, view,
+                               "refine")
+    try learned(host, lasting, parent, common, spoken, refine, "refine")
+    mut running := sha256.start()
+    sha256.add(running, tool_form)
+    field(running, u8('p'), common.refine_is)
+    --  The tool and what it needs, directly or through another.
+    mut marks := vec.new(item: bool)
+    for other in all do
+        _ = other
+        vec.push(marks, memory, false) else (problem)
+            gave_up(host, item.name, problem)
+            fail report.refused
+        end
+    end for
+    mut work := vec.new(item: usize)
+    try reached(host, memory, marks, work, index)
+    mut at: usize = 0
+    while at < vec.length(work) do
+        next: usize = vec.get(work, at) else (problem)
+            gave_up(host, item.name, problem)
+            fail report.refused
+        end
+        for needed in vec.used(all[next].needs) do
+            try reached(host, memory, marks, work, needed)
+        end for
+        inc at
+    end while
+    mut lines := vec.new(item: []u8)
+    for next in vec.used(work) do
+        line: []u8 = try glued(host, memory,
+                               [all[next].name, " ", all[next].tree])
+        vec.push(lines, memory, line) else (problem)
+            gave_up(host, item.name, problem)
+            fail report.refused
+        end
+    end for
+    order: usize = 0
+    sort.sort_by(vec.used(lines), order, earlier)
+    for line in vec.used(lines) do field(running, u8('a'), line) end for
+    for provided in programs do
+        field(running, u8('w'), provided.name)
+        field(running, u8('w'), provided.start)
+    end for
+    key: sha256.digest = sha256.finish(running)
+    mut was_kept: bool = true
+    mut sum: sha256.digest = zeroed
+    had: store.kept = store.known(host, memory, common.kept_in, key)
+        else (problem)
+        _ = problem
+        was_kept = false
+        (entry: zeroed, said: vec.new(item: store.piece))
+    end
+    if was_kept and not asked.again then
+        sum = had.entry
+        io.write(host, io.out(host), "tool ") else none
+        io.write(host, io.out(host), item.name) else none
+        io.write(host, io.out(host), ": kept\n") else none
+    else
+        io.write(host, io.out(host), "tool ") else none
+        io.write(host, io.out(host), item.name) else none
+        io.write(host, io.out(host), "\n") else none
+        files.remove_all(host, memory, home) else (problem)
+            gave_up(host, home, problem)
+            fail report.refused
+        end
+        try made(host, view)
+        try linked(host, try glued(host, memory, [common.work, "/packages"]),
+                   try glued(host, memory, [view, "/packages"]))
+        out: []u8 = try store.fresh(host, memory, common.kept_in)
+        names: forms = (raw: true, spelled: ["", "", "", ""])
+        mut heard := vec.new(item: store.piece)
+        for provided in programs do
+            words: [7][]u8 = ["refine", "compile", "--root", "packages",
+                              try glued(host, memory,
+                                        ["packages/", item.name, "/",
+                                         provided.start]),
+                              "-o",
+                              try glued(host, memory,
+                                        [out, "/", provided.name])]
+            ended_well: bool = started(host, memory, common, names, spoken,
+                                       view, refine, words[0..<7], heard)
+                else (problem)
+                _ = problem
+                false
+            end
+            if not ended_well then
+                files.remove_all(host, memory, out) else none
+                fail report.refused
+            end if
+        end for
+        sum = try store.admit(host, parent, memory, common.kept_in, out)
+        try store.note(host, memory, common.kept_in, key, sum,
+                       vec.used(heard))
+    end if
+    entry: []u8 = try store.entry_path(host, memory, common.kept_in, sum)
+    for provided in programs do
+        made_tool: tool =
+            (name: try glued(host, lasting, [provided.name]),
+             path: try glued(host, lasting, [entry, "/", provided.name]))
+        vec.push(common.tools, lasting, made_tool) else (problem)
+            gave_up(host, item.name, problem)
+            fail report.refused
+        end
+    end for
+end tool_made
+
+--  Mark the package at `index` and put it in the work, unless it is.
+reached: (host: blocking.host, memory: lifetime.memory,
+          inout marks: vec.list(bool), inout work: vec.list(usize),
+          index: usize) -> none ! report.refused =
+    slot: ptr mut bool = vec.at(marks, index) else (problem)
+        gave_up(host, "the packages", problem)
+        fail report.refused
+    end
+    return when slot.val
+    slot.val = true
+    vec.push(work, memory, index) else (problem)
+        gave_up(host, "the packages", problem)
+        fail report.refused
+    end
+end reached
