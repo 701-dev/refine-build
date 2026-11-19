@@ -1,0 +1,2 @@
+refine-build: unknown option `--wat`; `refine-build --help` lists the options
+[exit 2]

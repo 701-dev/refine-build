@@ -1,0 +1,206 @@
+-- What the tool does to the file system: reading a file whole, making and
+-- removing directory trees, links, and finding a program on PATH.  Paths
+-- are byte strings here and become host strings where the system is asked.
+
+import core/io
+import core/mem
+import core/text
+import core/vec
+import hosted/blocking
+import janhaan/refine_build/lifetime
+import janhaan/refine_build/text/strings
+import platform/posix
+
+--- The whole content of the file at `path`, living as long as `memory`.
+--- It is read into the one block it is returned in, which grows in place
+--- while it is the region's newest.
+public read_all: (host: blocking.host, memory: lifetime.memory, path: []u8)
+                 -> (content: []u8)
+                 ! io.not_found | io.no_access | io.is_a_directory
+                 | io.io_failed | mem.out_of_memory =
+    opened: io.file = try io.open_read(host, text.host_over(path))
+    defer io.close(host, opened) else none
+    mut whole := vec.new(item: u8)
+    loop do
+        room: []mut u8 = try vec.spare_bytes(whole, memory, 4096)
+        got: usize = try io.read(host, opened, room)
+        break when got == 0
+        vec.extend_bytes(whole, got) else (problem)
+            _ = problem
+            fail io.io_failed
+        end
+    end loop
+    content = vec.used(whole)
+end read_all
+
+--- Nothing is at the path.
+public absent: atom
+--- What is at a path: an `io.entry_kind`, or `absent`.
+public found: type = absent | io.regular | io.subdirectory
+    | io.symbolic_link | io.special
+
+--- What is at `path`, a final symbolic link taken as itself.
+public kind_of: (host: blocking.host, path: []u8) -> (kind: found)
+                ! io.no_access | io.io_failed =
+    kind = absent
+    status: io.status = io.status_of(host, text.host_over(path),
+                                     io.not_following) else (problem)
+        return when problem == io.not_found
+        fail io.no_access when problem == io.no_access
+        fail io.io_failed
+    end
+    match status.kind
+        io.regular: kind = io.regular
+        io.subdirectory: kind = io.subdirectory
+        io.symbolic_link: kind = io.symbolic_link
+        io.special: kind = io.special
+    end match
+end kind_of
+
+--- The working directory's absolute path, living as long as `memory`.
+public working: (host: blocking.host, memory: lifetime.memory) -> (path: []u8)
+                ! io.io_failed | mem.out_of_memory =
+    mut room: [4096]u8 = zeroed
+    here: text.host_string = try io.current_directory(host, room)
+    path = try strings.keep(memory, text.host_bytes(here))
+end working
+
+--- Make the directory `path` and every directory above it that is
+--- missing.  One that is already there is left as it is.
+public make_all: (host: blocking.host, path: []u8)
+                 -> none ! io.not_found | io.no_access | io.io_failed =
+    mut at: usize = 0
+    while at < lenof path do
+        rest: []u8 = path[at + 1..<lenof path]
+        stop: usize = at + 1 + strings.find(rest, u8('/'))
+        io.make_directory(host, text.host_over(path[0..<stop])) else (problem)
+            fail io.not_found when problem == io.not_found
+            fail io.no_access when problem == io.no_access
+            fail io.io_failed when problem == io.io_failed
+        end
+        at = stop
+    end while
+end make_all
+
+--- Remove what is at `path`: a file, a link, or a directory with all it
+--- holds.  A link is removed and never followed.  Nothing there is fine.
+--- The paths of what a directory holds are made in `memory` and are of no
+--- use afterwards, so give it a region that ends soon.
+public remove_all: (host: blocking.host, memory: lifetime.memory, path: []u8)
+                   -> none
+                   ! io.not_found | io.no_access | io.io_failed
+                   | mem.out_of_memory =
+    kind: found = try kind_of(host, path)
+    return when kind == absent
+    if kind <> io.subdirectory then
+        try io.remove_file(host, text.host_over(path))
+        return
+    end if
+    try empty(host, memory, path)
+    try io.remove_directory(host, text.host_over(path))
+end remove_all
+
+--  Remove everything the directory `path` holds.  Each pass lists the
+--  directory afresh and removes what it lists, since a listing does not
+--  promise what it gives of a directory that changes under it.
+empty: (host: blocking.host, memory: lifetime.memory, path: []u8)
+       -> none
+       ! io.not_found | io.no_access | io.io_failed | mem.out_of_memory =
+    loop do
+        removed: usize = try empty_once(host, memory, path)
+        break when removed == 0
+    end loop
+end empty
+
+--  List the directory `path` once and remove what the listing gave.
+empty_once: (host: blocking.host, memory: lifetime.memory, path: []u8)
+            -> (removed: usize)
+            ! io.not_found | io.no_access | io.io_failed
+            | mem.out_of_memory =
+    mut names := vec.new(item: []u8)
+    mut buffer: [io.directory_buffer]u8 = zeroed
+    mut listing: io.directory =
+        try io.open_directory(host, text.host_over(path), buffer)
+    loop do
+        item: io.entry = io.read_entry(host, listing) else (problem)
+            io.close_directory(host, listing) else none
+            fail problem
+        end
+        name: []u8 = text.host_bytes(item.name)
+        break when lenof name == 0
+        below: []u8 = strings.joined(memory, [path, "/", name])
+            else (problem)
+            io.close_directory(host, listing) else none
+            fail problem
+        end
+        vec.push(names, memory, below) else (problem)
+            io.close_directory(host, listing) else none
+            fail problem
+        end
+    end loop
+    try io.close_directory(host, listing)
+    removed = vec.length(names)
+    for below in vec.used(names) do
+        try remove_all(host, memory, below)
+    end for
+end empty_once
+
+--- Make `path` a symbolic link to `target`, replacing a link that is
+--- there.  Anything else there is in the way, `io.io_failed`.
+public link: (host: blocking.host, target: []u8, path: []u8)
+             -> none ! io.not_found | io.no_access | io.io_failed =
+    kind: found = try kind_of(host, path)
+    if kind == io.symbolic_link then
+        try io.remove_file(host, text.host_over(path))
+    elsif kind <> absent then
+        fail io.io_failed
+    end if
+    posix.symbolic_link_at(text.host_over(target), posix.working_directory,
+                           text.host_over(path)) else (problem)
+        fail io.not_found when problem == posix.enoent
+        fail io.no_access when problem == posix.eacces
+        fail io.io_failed
+    end
+end link
+
+--  Whether `path` names a regular file, through links.
+is_file: (host: blocking.host, path: []u8) -> (yes: bool) =
+    yes = false
+    status: io.status = io.status_of(host, text.host_over(path),
+                                     io.following) else (problem)
+        _ = problem
+        return
+    end
+    yes = status.kind == io.regular
+end is_file
+
+--- The path of the program `name`: itself when it has a `/` in it, or
+--- else the first regular file of that name in a directory of the PATH
+--- variable.  The path lives as long as `memory`, and so does each path
+--- that was tried before it.
+public program: (host: blocking.host, memory: lifetime.memory, name: []u8)
+                -> (path: []u8)
+                ! io.not_found | mem.out_of_memory =
+    if strings.find(name, u8('/')) < lenof name then
+        path = try strings.keep(memory, name)
+        return
+    end if
+    listed: text.host_string =
+        io.variable_named(host, text.host_over("PATH")) else (problem)
+            _ = problem
+            fail io.not_found
+        end
+    mut rest: []u8 = text.host_bytes(listed)
+    loop do
+        cut: usize = strings.find(rest, u8(':'))
+        if cut > 0 then
+            tried: []u8 = try strings.joined(memory, [rest[0..<cut], "/", name])
+            if is_file(host, tried) then
+                path = tried
+                return
+            end if
+        end if
+        fail io.not_found when cut == lenof rest
+        rest = rest[cut + 1..<lenof rest]
+    end loop
+end program

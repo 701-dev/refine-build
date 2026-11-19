@@ -1,0 +1,3 @@
+step two
+refine-build: step `two`: no program at `tools/missing` in the step's view; a program given by a path is an input of the step, or inside one
+[exit 1]

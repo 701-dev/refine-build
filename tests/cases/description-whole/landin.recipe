@@ -1,0 +1,3 @@
+rule say
+    run echo built
+step all say

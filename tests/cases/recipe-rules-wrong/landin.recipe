@@ -1,0 +1,8 @@
+rule norun
+rule braces
+    run echo {open and}close {} {a{b}} ok{{fine}}
+rule copy
+    run cp x{in} {out}/{name} {mode}
+    set mode -v
+    set unused 1
+step one copy

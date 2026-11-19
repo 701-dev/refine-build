@@ -1,0 +1,251 @@
+-- Checking a recipe once all its lines are read: every rule runs
+-- something, every step has its rule and a value for each placeholder,
+-- and no step needs its own output.
+
+import core/mem
+import core/vec
+import hosted/blocking
+import janhaan/refine_build/lifetime
+import janhaan/refine_build/report
+import janhaan/refine_build/text/lines
+import janhaan/refine_build/text/strings
+
+check: (host: blocking.host, memory: lifetime.memory, file: []u8,
+        inout into: recipe, default_lines: []lines.line)
+       -> none ! report.refused | mem.out_of_memory =
+    mut wrong: bool = false
+    for how in vec.used(into.rules) do
+        if how.run_number == 0 then
+            report.at_line(host, file, how.number,
+                           ["rule `", how.name,
+                            "` has no `run` line; say what it runs with `run PROGRAM WORDS...`"])
+            wrong = true
+            continue
+        end if
+        for word in vec.used(how.run) do
+            mut at: usize = 0
+            loop do
+                found: piece = piece_at(word, at)
+                break when found.kind == ended
+                if found.kind == broken then
+                    report.at_line(host, file, how.run_number,
+                                   ["a brace in `", word,
+                                    "` opens or closes nothing; write `{name}` for a value and `{{` or `}}` for a brace itself"])
+                    wrong = true
+                    break
+                end if
+                if found.kind == named
+                  and strings.same(word[found.start..<found.stop], "in")
+                  and lenof word <> 4 then
+                    report.at_line(host, file, how.run_number,
+                                   ["`{in}` is part of `", word,
+                                    "`; it stands for several words, one for each `from` input, so write it as a word of its own"])
+                    wrong = true
+                end if
+                at = found.after
+            end loop
+        end for
+        for item in vec.used(how.sets) do
+            if not uses(how, item.name) then
+                report.at_line(host, file, item.number,
+                               ["nothing in rule `", how.name, "` uses `{",
+                                item.name,
+                                "}`; use it in the `run` line or remove the `set`"])
+                wrong = true
+            end if
+        end for
+    end for
+    fail report.refused when wrong
+    for index in usize(0)..<vec.length(into.steps) do
+        check_step(host, file, into, index) else (problem)
+            _ = problem
+            wrong = true
+        end
+    end for
+    fail report.refused when wrong
+    for item in default_lines do
+        words: [][]u8 = vec.used(item.words)
+        for name in words[1..<lenof words] do
+            index: usize = step_named(into, name) else (problem)
+                _ = problem
+                report.at_line(host, file, item.number,
+                               ["no step `", name,
+                                "` for `default` to name; it names steps of this recipe"])
+                wrong = true
+                continue
+            end
+            try vec.push(into.defaults, memory, index)
+        end for
+    end for
+    fail report.refused when wrong
+    --  One list of marks serves every step: it is cleared for each.
+    mut seen := vec.new(item: bool)
+    for other in vec.used(into.steps) do
+        _ = other
+        try vec.push(seen, memory, false)
+    end for
+    for taken, index in vec.used(into.steps) do
+        marks: []mut bool = vec.used(seen)
+        for at in usize(0)..<lenof marks do marks[at] = false end for
+        if reaches(into, index, index, seen) then
+            report.at_line(host, file, taken.number,
+                           ["step `", taken.name,
+                            "` needs its own output, directly or through the steps it takes inputs from; a step runs after every step it names, so one of them must stop naming the other"])
+            wrong = true
+        end if
+    end for
+    fail report.refused when wrong
+end check
+
+--  Check the step at `index` against its rule, and note the rule's index.
+check_step: (host: blocking.host, file: []u8, inout into: recipe,
+             index: usize) -> none ! report.refused =
+    slot: ptr mut step = vec.at(into.steps, index) else (problem)
+        _ = problem
+        fail report.refused
+    end
+    taken: step = slot.val
+    try wants(host, file, taken.number, plain_name(taken.name),
+              "a step's name becomes a directory, so it is letters, digits, `_`, `-` and `.`, and does not begin with `.`")
+    try wants(host, file, taken.number, not strings.same(taken.name, packages),
+              "`packages` is the input the tool supplies; give the step another name")
+    mut found: bool = false
+    for how, at in vec.used(into.rules) do
+        if strings.same(how.name, taken.rule_name) then
+            slot.val.rule_at = at
+            found = true
+        end if
+    end for
+    if not found then
+        report.at_line(host, file, taken.number,
+                       ["step `", taken.name, "` names the rule `",
+                        taken.rule_name,
+                        "`, and the recipe has none of that name; write `rule ",
+                        taken.rule_name, "` with its `run` line"])
+        fail report.refused
+    end if
+    how: rule = vec.get(into.rules, slot.val.rule_at) else (problem)
+        _ = problem
+        fail report.refused
+    end
+    mut wrong: bool = false
+    for item in vec.used(taken.sets) do
+        if not uses(how, item.name) then
+            report.at_line(host, file, item.number,
+                           ["nothing in rule `", how.name, "` uses `{",
+                            item.name,
+                            "}`; check the name against the rule's `run` line or remove the `set`"])
+            wrong = true
+        end if
+    end for
+    for word in vec.used(how.run) do
+        mut at: usize = 0
+        loop do
+            part: piece = piece_at(word, at)
+            break when part.kind == ended or part.kind == broken
+            at = part.after
+            continue when part.kind <> named
+            name: []u8 = word[part.start..<part.stop]
+            continue when strings.same(name, "in") or strings.same(name, "out")
+            _ = value_of(how, taken, name) else (problem)
+                _ = problem
+                report.at_line(host, file, taken.number,
+                               ["rule `", how.name, "` uses `{", name,
+                                "}`, and step `", taken.name,
+                                "` gives it no value; write `set ", name,
+                                " VALUE` under the step or under the rule"])
+                wrong = true
+                ""
+            end
+        end loop
+    end for
+    for name in vec.used(taken.direct) do
+        if not input_fits(host, file, taken, name) then wrong = true end if
+    end for
+    for name in vec.used(taken.beside) do
+        if not input_fits(host, file, taken, name) then wrong = true end if
+    end for
+    fail report.refused when wrong
+end check_step
+
+--  Whether `name` can be an input: a step's name, `packages`, or a path
+--  that stays inside the project.
+input_fits: (host: blocking.host, file: []u8, taken: step, name: []u8)
+            -> (yes: bool) =
+    yes = inside(name)
+    if not yes then
+        report.at_line(host, file, taken.number,
+                       ["the input `", name, "` of step `", taken.name,
+                        "` is no path inside the project; an input is `packages`, a step's name, or a path with no `..`, not starting with `/`"])
+    end if
+end input_fits
+
+--- Whether `path` is a relative path that stays below where it starts:
+--- not empty, no leading or doubled `/`, no `.` or `..` part.
+public inside: (path: []u8) -> (yes: bool) =
+    yes = false
+    mut rest: []u8 = path
+    loop do
+        cut: usize = strings.find(rest, u8('/'))
+        part: []u8 = rest[0..<cut]
+        return when lenof part == 0
+        return when strings.same(part, ".") or strings.same(part, "..")
+        break when cut == lenof rest
+        rest = rest[cut + 1..<lenof rest]
+        break when lenof rest == 0
+    end loop
+    yes = true
+end inside
+
+plain_name: (name: []u8) -> (yes: bool) =
+    yes = false
+    return when lenof name == 0 or name[0] == u8('.')
+    for byte in name do
+        lower: bool = byte >= u8('a') and byte <= u8('z')
+        upper: bool = byte >= u8('A') and byte <= u8('Z')
+        digit: bool = byte >= u8('0') and byte <= u8('9')
+        other: bool = byte == u8('_') or byte == u8('-') or byte == u8('.')
+        return when not (lower or upper or digit or other)
+    end for
+    yes = true
+end plain_name
+
+--  Whether a step that `start` takes an input from, directly or through
+--  other steps, is `target`.  `seen` marks the steps already looked at.
+--  It allocates nothing.
+reaches: (value: recipe, start: usize, target: usize,
+          inout seen: vec.list(bool)) -> (yes: bool) =
+    yes = false
+    taken: step = vec.get(value.steps, start) else (problem)
+        _ = problem
+        return
+    end
+    yes = reaches_through(value, vec.used(taken.direct), target, seen)
+          or reaches_through(value, vec.used(taken.beside), target, seen)
+end reaches
+
+--  Whether one of the inputs `names` is `target` or reaches it.
+reaches_through: (value: recipe, names: [][]u8, target: usize,
+                  inout seen: vec.list(bool)) -> (yes: bool) =
+    yes = false
+    for name in names do
+        needed: usize = step_named(value, name) else (problem)
+            _ = problem
+            continue
+        end
+        if needed == target then
+            yes = true
+            return
+        end if
+        slot: ptr mut bool = vec.at(seen, needed) else (problem)
+            _ = problem
+            continue
+        end
+        continue when slot.val
+        slot.val = true
+        if reaches(value, needed, target, seen) then
+            yes = true
+            return
+        end if
+    end for
+end reaches_through

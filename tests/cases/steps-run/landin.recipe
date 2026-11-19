@@ -1,0 +1,18 @@
+-- Two notes are gathered, one is copied under a name with a space in it,
+-- and the last step lists what it sees: a step's output and a directory
+-- of the project, each under its own name.
+rule gather
+    run cp {in} {out}
+rule rename
+    run cp first/a.txt "{out}/{name}"
+rule show
+    run ls second more/deep {mark}
+    set mark -1
+rule words
+    run echo "tab\there" "\x41\u{e9}" {{braces}} -- a comment after the words
+step first   gather  from notes/a.txt notes/b.txt
+step second  rename  with first
+    set name "a note.txt"
+step third   show    with second more
+step spoken  words
+default third spoken

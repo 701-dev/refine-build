@@ -1,0 +1,6 @@
+rule odd
+    run no-such-program-anywhere {out}
+rule inside
+    run tools/missing {out}
+step one odd
+step two inside

@@ -1,0 +1,13 @@
+rule copy
+    run cp {in} {out}/{name} {mode}
+    set mode -v
+step one copy
+    set nmae x
+step two missing
+step packages copy
+    set name y
+step .hidden copy
+    set name y
+step up copy from ../x /abs a//b ok/
+    set name y
+default one nothere

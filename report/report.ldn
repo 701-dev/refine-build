@@ -1,0 +1,32 @@
+-- What the tool says to a person, on standard error.
+
+import core/io
+import core/text
+import hosted/blocking
+
+--- Something was wrong and has been said; the caller only has to stop.
+public refused: atom
+
+--- Say `parts`, one after another, as one line.
+public say: (host: blocking.host, parts: [][]u8) -> none =
+    io.write(host, io.err(host), "refine-build: ") else none
+    for part in parts do io.write(host, io.err(host), part) else none end for
+    io.write(host, io.err(host), "\n") else none
+end say
+
+--- Say what is wrong at a line of a file, `file:12: ...`, or with the
+--- file as a whole when `number` is 0.
+public at_line: (host: blocking.host, file: []u8, number: usize,
+                 parts: [][]u8) -> none =
+    io.write(host, io.err(host), file) else none
+    if number > 0 then
+        mut room: [24]u8 = zeroed
+        mut digits := text.over(room)
+        text.append_usize(digits, number) else none
+        io.write(host, io.err(host), ":") else none
+        io.write(host, io.err(host), text.used(digits)) else none
+    end if
+    io.write(host, io.err(host), ": ") else none
+    for part in parts do io.write(host, io.err(host), part) else none end for
+    io.write(host, io.err(host), "\n") else none
+end at_line

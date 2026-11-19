@@ -1,0 +1,3 @@
+landin.package: no `package` line; name the package with `package owner/name`
+landin.package: `kind program` and no `program` line; name each executable with `program NAME MODULE`
+[exit 1]

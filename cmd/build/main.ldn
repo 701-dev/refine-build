@@ -1,0 +1,268 @@
+-- refine-build: runs a package's recipe.  `refine build` dispatches here.
+--
+--     refine-build [--refine PATH] [--check] [STEP...]
+--
+-- Run in a package's directory, it reads `landin.package` and
+-- `landin.recipe`, says everything that is wrong in them, and runs the
+-- steps asked for, or the recipe's `default` steps, or every step when it
+-- names none.  Each runs after the steps it takes inputs from.
+--
+-- `--repeat N` is for the tool's own tests and is not in the help: it does
+-- the whole build N times in this one process, as a watch mode would, so
+-- that a test can see that the memory in use does not grow with N.
+
+import core/failure
+import core/io
+import core/region
+import core/text
+import core/vec
+import hosted/blocking
+import hosted/heap
+import janhaan/refine_build/description
+import janhaan/refine_build/files
+import janhaan/refine_build/lifetime
+import janhaan/refine_build/recipe
+import janhaan/refine_build/report
+import janhaan/refine_build/steps
+import janhaan/refine_build/text/strings
+
+package_file: []u8 = "landin.package"
+recipe_file: []u8 = "landin.recipe"
+
+usage: []u8 = """usage: refine-build [--refine PATH] [--check] [STEP...]
+
+    Run in a package's directory: reads landin.package and landin.recipe
+    and runs the steps named, or the recipe's default steps.
+
+      --refine PATH   the refine that `refine` in a run line means;
+                      without it, the first refine on PATH
+      --check         read and check the two files, and run nothing
+      -h, --help      print this and exit
+    """
+
+--- What the command line asked for.
+options: type = struct
+    refine: []u8
+    check_only: bool
+    help: bool
+    repeat: usize
+    wanted: vec.list([]u8)
+end options
+
+public main: () -> (code: i32) =
+    host := blocking.new()
+    --  The one place the heap is taken.  Everything below is given a
+    --  region over it, or the heap itself as the parent of one (see
+    --  `lifetime`).
+    parent := heap.new()
+    --  The command line lives as long as the process.
+    mut ledger: lifetime.ledger = zeroed
+    memory := region.over(ledger, parent)
+    defer region.release(ledger, parent)
+    code = 0
+    asked: options = arguments(host, memory) else (problem)
+        code = if problem == wrong_usage then 2 else 1 end if
+        return
+    end
+    if asked.help then
+        io.write(host, io.out(host), usage) else none
+        return
+    end if
+    mut round: usize = 0
+    while round < asked.repeat do
+        build(host, parent, asked) else (problem)
+            _ = problem
+            code = 1
+            return
+        end
+        inc round
+    end while
+end main
+
+wrong_usage: atom
+
+--  One build: read and check the two files, and run the steps asked for.
+--  Everything it allocates is in a region of its own, released when the
+--  build has ended, however it ended, so a build can be repeated.
+build: (host: blocking.host, parent: lifetime.parent, asked: options)
+       -> none ! report.refused =
+    mut ledger: lifetime.ledger = zeroed
+    memory := region.over(ledger, parent)
+    defer region.release(ledger, parent)
+    package_source: []u8 = try content(host, memory, package_file)
+    about: description.description =
+        description.read(host, memory, package_file, package_source)
+        else (problem)
+            said(host, problem)
+            fail report.refused
+        end
+    recipe_source: []u8 = try content(host, memory, recipe_file)
+    plan: recipe.recipe =
+        recipe.read(host, memory, recipe_file, recipe_source) else (problem)
+            said(host, problem)
+            fail report.refused
+        end
+    request: steps.request = (package_file: package_file,
+                              recipe_file: recipe_file,
+                              refine: asked.refine)
+    try steps.fits(host, parent, request, plan)
+    mut targets := vec.new(item: usize)
+    for name in vec.used(asked.wanted) do
+        index: usize = recipe.step_named(plan, name) else (problem)
+            _ = problem
+            report.say(host,
+                       ["no step `", name, "` in ", recipe_file,
+                        "; name one of its steps, or none for its defaults"])
+            fail report.refused
+        end
+        try listed(host, memory, targets, index)
+    end for
+    if vec.length(targets) == 0 then
+        for index in vec.used(plan.defaults) do
+            try listed(host, memory, targets, index)
+        end for
+    end if
+    if vec.length(targets) == 0 then
+        for index in usize(0)..<vec.length(plan.steps) do
+            try listed(host, memory, targets, index)
+        end for
+    end if
+    return when asked.check_only
+    for wanted in vec.used(about.needs) do
+        report.at_line(host, package_file, wanted.number,
+                       ["`needs ", wanted.name,
+                        "` is read and checked, but this refine-build fetches no package yet, so a step would not find it; remove the line to build"])
+        fail report.refused
+    end for
+    for wanted in vec.used(about.uses) do
+        report.at_line(host, package_file, wanted.number,
+                       ["`uses ", wanted.name,
+                        "` is read and checked, but this refine-build fetches no tool yet; remove the line to build"])
+        fail report.refused
+    end for
+    sequence: vec.list(usize) =
+        recipe.order(memory, plan, vec.used(targets)) else (problem)
+            said(host, problem)
+            fail report.refused
+        end
+    try steps.run(host, memory, parent, request, about, plan,
+                  vec.used(sequence))
+end build
+
+--  Read the command line.  What it gives lives as long as `memory`.
+arguments: (host: blocking.host, memory: lifetime.memory)
+           -> (asked: options) ! report.refused | wrong_usage =
+    asked = (refine: "", check_only: false, help: false, repeat: 1,
+             wanted: vec.new(item: []u8))
+    count: usize = io.argument_count(host)
+    mut at: usize = 0
+    while at < count do
+        word: []u8 = try argument(host, memory, at)
+        inc at
+        if strings.same(word, "--help") or strings.same(word, "-h") then
+            asked.help = true
+        elsif strings.same(word, "--check") then
+            asked.check_only = true
+        elsif strings.same(word, "--refine") then
+            if at == count then
+                report.say(host, ["`--refine` takes a path: `--refine PATH`"])
+                fail wrong_usage
+            end if
+            asked.refine = try whole_path(host, memory,
+                                          try argument(host, memory, at))
+            inc at
+        elsif strings.same(word, "--repeat") then
+            if at == count then
+                report.say(host, ["`--repeat` takes a count: `--repeat N`"])
+                fail wrong_usage
+            end if
+            times: []u8 = try argument(host, memory, at)
+            asked.repeat = text.parse_usize(times) else (problem)
+                _ = problem
+                report.say(host,
+                           ["`--repeat ", times,
+                            "`: the count is a whole number"])
+                fail wrong_usage
+            end
+            inc at
+        elsif strings.starts(word, "-") then
+            report.say(host,
+                       ["unknown option `", word,
+                        "`; `refine-build --help` lists the options"])
+            fail wrong_usage
+        else
+            vec.push(asked.wanted, memory, word) else (problem)
+                said(host, problem)
+                fail report.refused
+            end
+        end if
+    end while
+end arguments
+
+--  A copy of the argument at `index`.
+argument: (host: blocking.host, memory: lifetime.memory, index: usize)
+          -> (word: []u8) ! report.refused =
+    given: text.host_string = io.argument_at(host, index) else (problem)
+        said(host, problem)
+        fail report.refused
+    end
+    word = strings.keep(memory, text.host_bytes(given)) else (problem)
+        said(host, problem)
+        fail report.refused
+    end
+end argument
+
+--  The absolute path of the program `given` names: a step's program runs
+--  in the step's view, where a relative path would mean another file.
+whole_path: (host: blocking.host, memory: lifetime.memory, given: []u8)
+            -> (path: []u8) ! report.refused =
+    found: []u8 = files.program(host, memory, given) else (problem)
+        _ = problem
+        report.say(host, ["`--refine ", given, "`: no such program on PATH"])
+        fail report.refused
+    end
+    if found[0] == u8('/') then
+        path = found
+        return
+    end if
+    project: []u8 = files.working(host, memory) else (problem)
+        said(host, problem)
+        fail report.refused
+    end
+    path = strings.joined(memory, [project, "/", found]) else (problem)
+        said(host, problem)
+        fail report.refused
+    end
+end whole_path
+
+--  The content of `file`, or said why it cannot be read.
+content: (host: blocking.host, memory: lifetime.memory, file: []u8)
+         -> (source: []u8) ! report.refused =
+    source = files.read_all(host, memory, file) else (problem)
+        if problem == io.not_found then
+            report.at_line(host, file, 0,
+                           ["not found; run refine-build in a package's directory, which holds its landin.package and landin.recipe"])
+        else
+            report.at_line(host, file, 0, [failure.words(problem)])
+        end if
+        fail report.refused
+    end
+end content
+
+listed: (host: blocking.host, memory: lifetime.memory,
+         inout targets: vec.list(usize), index: usize)
+        -> none ! report.refused =
+    vec.push(targets, memory, index) else (problem)
+        said(host, problem)
+        fail report.refused
+    end
+end listed
+
+--  Say a problem, unless it is one that was already said.
+said: (host: blocking.host, problem: failure.reason | report.refused)
+      -> none =
+    match problem
+        report.refused: return
+        _ (rest): report.say(host, [failure.words(rest)])
+    end match
+end said

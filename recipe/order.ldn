@@ -1,0 +1,71 @@
+-- The order steps run in: each after the steps it takes inputs from.
+
+import core/mem
+import core/vec
+import janhaan/refine_build/lifetime
+
+--- The steps to run for `wanted`, indices into `steps`: each of them and
+--- every step it takes an input from, a step always after those it needs.
+--- The recipe was checked, so no step needs itself.
+public order: (memory: lifetime.memory, value: recipe, wanted: []usize)
+              -> (sequence: vec.list(usize)) ! mem.out_of_memory =
+    sequence = vec.new(item: usize)
+    mut marks := vec.new(item: u8)
+    for item in vec.used(value.steps) do
+        _ = item
+        try vec.push(marks, memory, u8(0))
+    end for
+    for index in wanted do
+        _ = visit(memory, value, index, marks, sequence) else (problem)
+            fail mem.out_of_memory when problem == mem.out_of_memory
+            0
+        end
+    end for
+end order
+
+--  Put the step at `index` into `sequence` after every step it takes an
+--  input from.  A mark is 0 for a step not reached, 1 for one being
+--  visited and 2 for one placed.  A checked recipe has no step that needs
+--  itself, so a step being visited is never met again.
+visit: (memory: lifetime.memory, value: recipe, index: usize,
+        inout marks: vec.list(u8), inout sequence: vec.list(usize))
+       -> (placed: usize) ! mem.out_of_memory | no_such_step =
+    placed = index
+    mark: u8 = vec.get(marks, index) else (problem)
+        _ = problem
+        fail no_such_step
+    end
+    return when mark <> 0
+    try set_mark(marks, index, 1)
+    taken: step = vec.get(value.steps, index) else (problem)
+        _ = problem
+        fail no_such_step
+    end
+    for name in vec.used(taken.direct) do
+        try visit_input(memory, value, name, marks, sequence)
+    end for
+    for name in vec.used(taken.beside) do
+        try visit_input(memory, value, name, marks, sequence)
+    end for
+    try set_mark(marks, index, 2)
+    try vec.push(sequence, memory, index)
+end visit
+
+visit_input: (memory: lifetime.memory, value: recipe, name: []u8,
+              inout marks: vec.list(u8), inout sequence: vec.list(usize))
+             -> none ! mem.out_of_memory | no_such_step =
+    needed: usize = step_named(value, name) else (problem)
+        _ = problem
+        return
+    end
+    _ = try visit(memory, value, needed, marks, sequence)
+end visit_input
+
+set_mark: (inout marks: vec.list(u8), index: usize, mark: u8)
+          -> none ! no_such_step =
+    slot: ptr mut u8 = vec.at(marks, index) else (problem)
+        _ = problem
+        fail no_such_step
+    end
+    slot.val = mark
+end set_mark

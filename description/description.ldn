@@ -1,0 +1,251 @@
+-- The description, `landin.package`: what a package is called, what it
+-- provides and what it needs.  It is data and nothing in it is executed.
+--
+--     package  owner/name
+--     kind     library | program
+--     licence  WORDS...
+--     program  NAME MODULE
+--     needs    owner/name MAJOR.MINOR.PATCH
+--     uses     owner/name MAJOR.MINOR.PATCH
+
+import core/mem
+import core/vec
+import hosted/blocking
+import janhaan/refine_build/lifetime
+import janhaan/refine_build/report
+import janhaan/refine_build/text/lines
+import janhaan/refine_build/text/strings
+
+--- Another package this one needs, or a tool its recipe uses, and the
+--- least version of it.
+public requirement: type = struct
+    name: []u8
+    version: []u8
+    number: usize
+end requirement
+
+--- A program the package provides: the executable's name and the module,
+--- a path inside the package, that holds its `main`.
+public program: type = struct
+    name: []u8
+    start: []u8
+    number: usize
+end program
+
+--- A description as read.  `owner` and `name` are the two halves of the
+--- package's name; `kind` and `licence` are empty when the file gives none.
+public description: type = struct
+    owner: []u8
+    name: []u8
+    kind: []u8
+    licence: []u8
+    programs: vec.list(program)
+    needs: vec.list(requirement)
+    uses: vec.list(requirement)
+end description
+
+--- Read the description in `source`, which is the content of `file`.
+--- Everything wrong in it is said, each with its line, and then the read
+--- fails `report.refused`.
+public read: (host: blocking.host, memory: lifetime.memory, file: []u8,
+              source: []u8) -> (result: description)
+             ! report.refused | mem.out_of_memory =
+    result = (owner: "", name: "", kind: "", licence: "",
+              programs: vec.new(item: program),
+              needs: vec.new(item: requirement),
+              uses: vec.new(item: requirement))
+    doc := try lines.read(memory, source)
+    mut wrong: bool = false
+    for item in vec.used(doc.lines) do
+        read_line(host, memory, file, item, result) else (problem)
+            fail mem.out_of_memory when problem == mem.out_of_memory
+            wrong = true
+        end
+    end for
+    mut named: bool = false
+    for item in vec.used(doc.lines) do
+        words: [][]u8 = vec.used(item.words)
+        if lenof words > 0 and strings.same(words[0], "package") then
+            named = true
+        end if
+    end for
+    if not named then
+        report.at_line(host, file, 0,
+                       ["no `package` line; name the package with `package owner/name`"])
+        wrong = true
+    end if
+    if strings.same(result.kind, "program")
+      and vec.length(result.programs) == 0 then
+        report.at_line(host, file, 0,
+                       ["`kind program` and no `program` line; name each executable with `program NAME MODULE`"])
+        wrong = true
+    end if
+    fail report.refused when wrong
+end read
+
+read_line: (host: blocking.host, memory: lifetime.memory, file: []u8,
+            escaping item: lines.line, inout into: description)
+           -> none ! report.refused | mem.out_of_memory =
+    if item.state <> lines.sound then
+        report.at_line(host, file, item.number, [lines.words_of(item.state)])
+        fail report.refused
+    end if
+    words: [][]u8 = vec.used(item.words)
+    keyword: []u8 = words[0]
+    given: usize = lenof words - 1
+    if strings.same(keyword, "package") then
+        try wants(host, file, item.number, given == 1,
+                  "`package` takes one word: `package owner/name`")
+        try once(host, file, item.number, lenof into.name == 0, "package")
+        try package_name(host, file, item.number, words[1])
+        cut: usize = strings.find(words[1], u8('/'))
+        into.owner = words[1][0..<cut]
+        into.name = words[1][cut + 1..<lenof words[1]]
+    elsif strings.same(keyword, "kind") then
+        try wants(host, file, item.number, given == 1,
+                  "`kind` takes one word: `kind library` or `kind program`")
+        try once(host, file, item.number, lenof into.kind == 0, "kind")
+        try wants(host, file, item.number,
+                  strings.same(words[1], "library")
+                  or strings.same(words[1], "program"),
+                  "a package's kind is `library` or `program`")
+        into.kind = words[1]
+    elsif strings.same(keyword, "licence") then
+        try wants(host, file, item.number, given >= 1,
+                  "`licence` takes the licence's name: `licence MIT`")
+        try once(host, file, item.number, lenof into.licence == 0, "licence")
+        mut whole: []u8 = words[1]
+        for word in words[2..<lenof words] do
+            whole = try strings.joined(memory, [whole, " ", word])
+        end for
+        into.licence = whole
+    elsif strings.same(keyword, "program") then
+        try wants(host, file, item.number, given == 2,
+                  "`program` takes two words: `program NAME MODULE`")
+        try wants(host, file, item.number,
+                  lenof words[1] > 0
+                  and strings.find(words[1], u8('/')) == lenof words[1],
+                  "a program's name is one word with no `/` in it")
+        try wants(host, file, item.number, is_module(words[2]),
+                  "a program's module is a path inside the package, such as `cmd/build`: lowercase letters, digits and `_` between `/`")
+        for other in vec.used(into.programs) do
+            if strings.same(other.name, words[1]) then
+                report.at_line(host, file, item.number,
+                               ["the program `", words[1],
+                                "` is named twice; remove one of the lines"])
+                fail report.refused
+            end if
+        end for
+        provided: program = (name: words[1], start: words[2],
+                             number: item.number)
+        try vec.push(into.programs, memory, provided)
+    elsif strings.same(keyword, "needs") or strings.same(keyword, "uses") then
+        try wants(host, file, item.number, given == 2,
+                  "`needs` and `uses` take two words: `needs owner/name 2.3.1`")
+        try package_name(host, file, item.number, words[1])
+        try wants(host, file, item.number, is_version(words[2]),
+                  "a version is three numbers, `MAJOR.MINOR.PATCH`, such as `2.3.1`")
+        for other in vec.used(into.needs) do
+            try unlike(host, file, item.number, other.name, words[1])
+        end for
+        for other in vec.used(into.uses) do
+            try unlike(host, file, item.number, other.name, words[1])
+        end for
+        wanted: requirement = (name: words[1], version: words[2],
+                               number: item.number)
+        if strings.same(keyword, "needs") then
+            try vec.push(into.needs, memory, wanted)
+        else
+            try vec.push(into.uses, memory, wanted)
+        end if
+    else
+        report.at_line(host, file, item.number,
+                       ["unknown keyword `", keyword,
+                        "`; a description line starts with package, kind, licence, program, needs or uses, and a comment with `--` and a space"])
+        fail report.refused
+    end if
+end read_line
+
+--  Refuse the line with `otherwise` unless `holds`.
+wants: (host: blocking.host, file: []u8, number: usize, holds: bool,
+        otherwise: []u8) -> none ! report.refused =
+    return when holds
+    report.at_line(host, file, number, [otherwise])
+    fail report.refused
+end wants
+
+--  Refuse a second line of a keyword that a file has once.
+once: (host: blocking.host, file: []u8, number: usize, first: bool,
+       keyword: []u8) -> none ! report.refused =
+    return when first
+    report.at_line(host, file, number,
+                   ["a second `", keyword,
+                    "` line; a description has one, so remove one of them"])
+    fail report.refused
+end once
+
+--  Refuse a package that is already listed.
+unlike: (host: blocking.host, file: []u8, number: usize, listed: []u8,
+         name: []u8) -> none ! report.refused =
+    return when not strings.same(listed, name)
+    report.at_line(host, file, number,
+                   ["`", name,
+                    "` is listed twice; a package is needed or used once, at one version"])
+    fail report.refused
+end unlike
+
+--  Refuse a name that is not `owner/name` in module path segments, or
+--  whose owner is one of the library's own namespaces.
+package_name: (host: blocking.host, file: []u8, number: usize, name: []u8)
+              -> none ! report.refused =
+    cut: usize = strings.find(name, u8('/'))
+    mut holds: bool = cut < lenof name
+    if holds then
+        holds = strings.is_segment(name[0..<cut])
+                and strings.is_segment(name[cut + 1..<lenof name])
+    end if
+    if not holds then
+        report.at_line(host, file, number,
+                       ["`", name,
+                        "` is no package name; write `owner/name`, each half lowercase letters, digits and `_`, since both become directories in an import path"])
+        fail report.refused
+    end if
+    owner: []u8 = name[0..<cut]
+    if strings.same(owner, "core") or strings.same(owner, "hosted")
+      or strings.same(owner, "platform") or strings.same(owner, "landin") then
+        report.at_line(host, file, number,
+                       ["`", owner,
+                        "` is the library's own namespace and cannot own a package; choose another owner"])
+        fail report.refused
+    end if
+end package_name
+
+--- Whether `path` is module path segments joined by `/`.
+public is_module: (path: []u8) -> (yes: bool) =
+    yes = false
+    mut rest: []u8 = path
+    loop do
+        cut: usize = strings.find(rest, u8('/'))
+        return when not strings.is_segment(rest[0..<cut])
+        break when cut == lenof rest
+        rest = rest[cut + 1..<lenof rest]
+    end loop
+    yes = true
+end is_module
+
+is_version: (word: []u8) -> (yes: bool) =
+    yes = false
+    mut parts: usize = 1
+    mut digits: usize = 0
+    for byte in word do
+        if byte == u8('.') then
+            return when digits == 0
+            inc parts
+            digits = 0
+        else
+            return when byte < u8('0') or byte > u8('9')
+            inc digits
+        end if
+    end for
+    yes = parts == 3 and digits > 0
+end is_version

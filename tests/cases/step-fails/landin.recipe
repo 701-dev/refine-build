@@ -1,0 +1,6 @@
+rule refuse
+    run false
+rule say
+    run echo never
+step broken refuse
+step last say with broken

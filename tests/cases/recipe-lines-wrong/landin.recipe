@@ -1,0 +1,21 @@
+run cp a b
+set x y
+rule
+rule copy
+run cp {in} {out}
+run cp again
+set a
+set in x
+set Big x
+rule copy
+step
+step one
+step one copy extra
+step one copy from a.txt
+step one copy
+set name
+stpe two copy
+default
+rule late
+step x late
+run echo hi

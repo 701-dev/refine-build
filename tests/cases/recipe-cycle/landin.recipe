@@ -1,0 +1,7 @@
+rule copy
+    run cp {in} {out}
+step a copy from b
+step b copy from c
+step c copy from a
+step d copy from d
+step e copy from a

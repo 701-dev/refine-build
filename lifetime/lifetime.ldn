@@ -1,0 +1,35 @@
+-- How long the tool's memory lives.
+--
+-- Nothing here is freed block by block.  Every allocation belongs to one of
+-- three lifetimes, each a region over the process's heap, and ends when
+-- that region is released:
+--
+--     the process   the command line as it was read
+--     one build     the two files as read and checked, and the order of
+--                   the steps
+--     one step      the paths, the view and the words of one step's program
+--
+-- `main` takes the heap once.  A routine that allocates is given the
+-- region it allocates from as `memory`, and what it returns lives as long
+-- as that region.  A routine that starts a shorter lifetime of its own is
+-- given the heap as `parent`, makes its region over it and releases it
+-- before it returns:
+--
+--     mut ledger: lifetime.ledger = zeroed
+--     scratch := region.over(ledger, parent)
+--     defer region.release(ledger, parent)
+--
+-- So a build can be repeated in one process, as a watch mode would, and the
+-- memory in use does not grow with the count.
+
+import core/region
+import hosted/heap
+
+--- The allocator of one lifetime.  It is a handle: copies share the region.
+public memory: type = region.region(heap.heap)
+
+--- What a shorter lifetime's region is made over: the process's heap.
+public parent: type = heap.heap
+
+--- The caller-owned state of one lifetime's region.  Declare it `zeroed`.
+public ledger: type = region.growing_space

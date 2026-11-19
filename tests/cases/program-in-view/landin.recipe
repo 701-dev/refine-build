@@ -1,0 +1,3 @@
+rule inside
+    run tools/missing {out}
+step two inside

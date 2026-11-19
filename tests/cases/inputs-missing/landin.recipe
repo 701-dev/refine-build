@@ -1,0 +1,4 @@
+rule copy
+    run cp {in} {out}
+step data copy from data/a.txt
+step two copy from data/missing.txt with nothing

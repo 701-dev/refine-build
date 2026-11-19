@@ -1,0 +1,197 @@
+-- Reads the keyword-first line files: the description, the recipe and the
+-- lock.  A line is a keyword followed by words, separated by spaces or tabs.
+--
+-- A word in double quotes may hold spaces, and takes Landin's escapes:
+-- \n \r \t \e \\ \" \' \xNN and \u{...}.  A word that is exactly `--`
+-- starts a comment that runs to the end of its line, so `--root` is a word
+-- and `-- note` is a comment.  A line with no word is not a line.
+
+import core/mem
+import core/text
+import core/vec
+import janhaan/refine_build/lifetime
+import janhaan/refine_build/text/strings
+
+--- Nothing is wrong with the line.
+public sound: atom
+--- A quoted word has no closing quote.
+public open_quote: atom
+--- A backslash is followed by something that is no escape.
+public bad_escape: atom
+--- A quote touches the word before or after it.
+public joined_quote: atom
+--- What is wrong with a line, if anything.
+public flaw: type = sound | open_quote | bad_escape | joined_quote
+
+--- One line: its number in the file, from 1, and its words with their
+--- quotes and escapes taken away.  When `state` is not `sound` the words
+--- are those read before the flaw.
+public line: type = struct
+    number: usize
+    words: vec.list([]u8)
+    state: flaw
+end line
+
+--- A file's lines, without the empty ones.
+public document: type = struct
+    lines: vec.list(line)
+end document
+
+--- Read `source` into its lines, which live as long as `memory` and keep
+--- nothing of `source`.  A flaw in a line is kept in the line, not
+--- reported: the reader of the file says where it is.
+public read: (memory: lifetime.memory, source: []u8) -> (result: document)
+             ! mem.out_of_memory =
+    result = (lines: vec.new(item: line))
+    mut at: usize = 0
+    mut number: usize = 1
+    --  One buffer serves every word of the file; each word is copied out
+    --  of it at its own length.
+    mut word := vec.new(item: u8)
+    while at < lenof source do
+        rest: []u8 = source[at..<lenof source]
+        stop: usize = mem.find(rest, u8('\n'))
+        mut current: line = (number: number, words: vec.new(item: []u8),
+                             state: sound)
+        try read_line(memory, rest[0..<stop], word, current)
+        if vec.length(current.words) > 0 or current.state <> sound then
+            try vec.push(result.lines, memory, current)
+        end if
+        at += stop + 1
+        inc number
+    end while
+end read
+
+--- What the words of a flaw are, for a person.
+public words_of: (state: flaw) -> (words: []u8) =
+    match state
+        sound: words = "nothing is wrong"
+        open_quote: words = "a quoted word has no closing quote"
+        bad_escape: words = "a backslash is followed by something that is no escape; the escapes are \\n \\r \\t \\e \\\\ \\\" \\' \\xNN and \\u{...}"
+        joined_quote: words = "a quote touches another word; put a space between them, or write \\\" inside a quoted word"
+    end match
+end words_of
+
+blank: (byte: u8) -> (yes: bool) =
+    yes = byte == u8(' ') or byte == u8('\t') or byte == u8('\r')
+end blank
+
+comment_at: (content: []u8, at: usize) -> (yes: bool) =
+    yes = false
+    return when at + 1 >= lenof content
+    return when content[at] <> u8('-') or content[at + 1] <> u8('-')
+    yes = at + 2 == lenof content or blank(content[at + 2])
+end comment_at
+
+read_line: (memory: lifetime.memory, content: []u8,
+            inout word: vec.list(u8), inout into: line)
+           -> none ! mem.out_of_memory =
+    mut at: usize = 0
+    loop do
+        while at < lenof content and blank(content[at]) do inc at end while
+        break when at == lenof content
+        break when comment_at(content, at)
+        vec.clear(word)
+        if content[at] == u8('"') then
+            at = quoted(memory, content, at + 1, word) else (problem)
+                match problem
+                    mem.out_of_memory: fail mem.out_of_memory
+                    open_quote: into.state = open_quote
+                    bad_escape: into.state = bad_escape
+                    joined_quote: into.state = joined_quote
+                end match
+                return
+            end
+        else
+            start: usize = at
+            while at < lenof content and not blank(content[at]) do
+                if content[at] == u8('"') then
+                    into.state = joined_quote
+                    return
+                end if
+                inc at
+            end while
+            try vec.append_bytes(word, memory, content[start..<at])
+        end if
+        kept: []u8 = try strings.keep(memory, vec.used(word))
+        try vec.push(into.words, memory, kept)
+    end loop
+end read_line
+
+--  Read a quoted word's inside from `at`, just after its opening quote,
+--  into `word`, and return where the line goes on after its closing quote.
+quoted: (memory: lifetime.memory, content: []u8, from_at: usize,
+         inout word: vec.list(u8)) -> (after: usize)
+        ! mem.out_of_memory | open_quote | bad_escape | joined_quote =
+    mut at: usize = from_at
+    loop do
+        fail open_quote when at == lenof content
+        byte: u8 = content[at]
+        inc at
+        break when byte == u8('"')
+        if byte <> u8('\\') then
+            try vec.push(word, memory, byte)
+            continue
+        end if
+        fail bad_escape when at == lenof content
+        escape: u8 = content[at]
+        inc at
+        if escape == u8('u') then
+            fail bad_escape when at == lenof content or content[at] <> u8('{')
+            inc at
+            mut scalar: u32 = 0
+            mut digits: usize = 0
+            loop do
+                fail bad_escape when at == lenof content
+                digit: u8 = content[at]
+                inc at
+                break when digit == u8('}')
+                fail bad_escape when digits == 6
+                scalar = scalar * 16 + try hex(digit)
+                inc digits
+            end loop
+            fail bad_escape when digits == 0
+            mut room: [4]u8 = zeroed
+            count: usize = text.encode(scalar, room) else (problem)
+                _ = problem
+                fail bad_escape
+            end
+            try vec.append_bytes(word, memory, room[0..<count])
+        elsif escape == u8('x') then
+            fail bad_escape when at + 2 > lenof content
+            high: u32 = try hex(content[at])
+            low: u32 = try hex(content[at + 1])
+            try vec.push(word, memory, u8(high * 16 + low))
+            at += 2
+        else
+            try vec.push(word, memory, try plain_escape(escape))
+        end if
+    end loop
+    fail joined_quote when at < lenof content and not blank(content[at])
+    after = at
+end quoted
+
+--  The byte a one-letter escape stands for.
+plain_escape: (letter: u8) -> (byte: u8) ! bad_escape =
+    if letter == u8('n') then byte = u8('\n')
+    elsif letter == u8('r') then byte = u8('\r')
+    elsif letter == u8('t') then byte = u8('\t')
+    elsif letter == u8('e') then byte = 27
+    elsif letter == u8('\\') or letter == u8('"') or letter == u8('\'') then
+        byte = letter
+    else
+        fail bad_escape
+    end if
+end plain_escape
+
+hex: (digit: u8) -> (value: u32) ! bad_escape =
+    if digit >= u8('0') and digit <= u8('9') then
+        value = u32(digit - u8('0'))
+    elsif digit >= u8('a') and digit <= u8('f') then
+        value = u32(digit - u8('a')) + 10
+    elsif digit >= u8('A') and digit <= u8('F') then
+        value = u32(digit - u8('A')) + 10
+    else
+        fail bad_escape
+    end if
+end hex

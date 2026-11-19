@@ -1,0 +1,22 @@
+-- How this package is built.  The goalpost: `refine build` in this directory
+-- runs this file with the refine-build it describes.
+--
+-- A line is a keyword and its words.  `run` is a word list started directly,
+-- never a shell line.  `{out}` is the step's fresh output directory.
+-- `packages` is supplied by the tool: this package and everything it needs,
+-- each under its owner/name path, ready to be a `--root`.
+
+rule compile
+    run  refine compile --root packages packages/janhaan/refine_build/{entry} -o {out}/{name}
+
+rule check
+    run  refine check --root packages packages/janhaan/refine_build/{entry}
+
+step tool  compile  with packages
+    set  entry  cmd/build
+    set  name   refine-build
+
+step checked  check  with packages
+    set  entry  cmd/build
+
+default tool checked

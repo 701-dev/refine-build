@@ -1,0 +1,100 @@
+-- The pieces of a `run` word: plain bytes and `{name}` placeholders, and
+-- what a placeholder stands for in a step.
+
+import core/vec
+import janhaan/refine_build/text/strings
+
+--- A piece of a `run` word is plain bytes.
+public plain: atom
+--- A piece of a `run` word is a placeholder's name, without its braces.
+public named: atom
+--- A brace in a `run` word opens or closes nothing.
+public broken: atom
+--- The word has no further piece.
+public ended: atom
+
+--- One piece of a `run` word: what it is, the bytes `word[start..<stop]`
+--- it covers, and where the next piece begins.
+public piece: type = struct
+    kind: plain | named | broken | ended
+    start: usize
+    stop: usize
+    after: usize
+end piece
+
+--- The piece of `word` that begins at `at`.
+public piece_at: (word: []u8, at: usize) -> (found: piece) =
+    count: usize = lenof word
+    found = (kind: ended, start: at, stop: at, after: at)
+    return when at >= count
+    if word[at] == u8('{') then
+        if at + 1 < count and word[at + 1] == u8('{') then
+            found = (kind: plain, start: at, stop: at + 1, after: at + 2)
+            return
+        end if
+        mut close: usize = at + 1
+        while close < count and word[close] <> u8('}') do
+            if word[close] == u8('{') then
+                found.kind = broken
+                return
+            end if
+            inc close
+        end while
+        if close == count or close == at + 1 then
+            found.kind = broken
+            return
+        end if
+        found = (kind: named, start: at + 1, stop: close, after: close + 1)
+    elsif word[at] == u8('}') then
+        if at + 1 < count and word[at + 1] == u8('}') then
+            found = (kind: plain, start: at, stop: at + 1, after: at + 2)
+        else
+            found.kind = broken
+        end if
+    else
+        mut stop: usize = at
+        while stop < count and word[stop] <> u8('{') and word[stop] <> u8('}') do
+            inc stop
+        end while
+        found = (kind: plain, start: at, stop: stop, after: stop)
+    end if
+end piece_at
+
+--- The value `name` has for `taken`, whose rule is `how`: the step's own
+--- `set`, or else the rule's.
+public value_of: (how: rule, taken: step, name: []u8)
+                 -> (value: []u8 from how, taken) ! no_such_step =
+    mut found: bool = false
+    value = ""
+    for item in vec.used(how.sets) do
+        if strings.same(item.name, name) then
+            value = item.value
+            found = true
+        end if
+    end for
+    for item in vec.used(taken.sets) do
+        if strings.same(item.name, name) then
+            value = item.value
+            found = true
+        end if
+    end for
+    fail no_such_step when not found
+end value_of
+
+--  Whether a word of `how`'s run line holds the placeholder `name`.
+uses: (how: rule, name: []u8) -> (yes: bool) =
+    yes = false
+    for word in vec.used(how.run) do
+        mut at: usize = 0
+        loop do
+            found: piece = piece_at(word, at)
+            break when found.kind == ended or found.kind == broken
+            if found.kind == named
+              and strings.same(word[found.start..<found.stop], name) then
+                yes = true
+                return
+            end if
+            at = found.after
+        end loop
+    end for
+end uses

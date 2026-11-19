@@ -1,0 +1,2 @@
+landin.package: not found; run refine-build in a package's directory, which holds its landin.package and landin.recipe
+[exit 1]

@@ -1,0 +1,59 @@
+-- Byte strings: copies that live as long as the region they are made in
+-- (see `lifetime`), and the comparisons the tool needs.
+
+import core/cmp
+import core/mem
+import janhaan/refine_build/lifetime
+
+--- A copy of `bytes` that lives as long as `memory`.
+public keep: (memory: lifetime.memory, bytes: []u8) -> (copy: []u8)
+             ! mem.out_of_memory =
+    copy = try joined(memory, [bytes])
+end keep
+
+--- The `parts` one after another, as one string that lives as long as
+--- `memory`.
+public joined: (memory: lifetime.memory, parts: [][]u8) -> (whole: []u8)
+               ! mem.out_of_memory =
+    mut total: usize = 0
+    for part in parts do total += lenof part end for
+    extent: usize = if total > 0 then total else usize(1) end if
+    block: ptr mut u8 = try mem.allocate(memory, extent, alignof u8)
+    mut owner := mem.storage_over(item: u8, base: block, slots: extent)
+    for part in parts do
+        mem.admit_copy(owner, part) else begin fail mem.out_of_memory end
+    end for
+    filled: []mut u8 = mem.used(owner)
+    whole = filled[0..<total]
+end joined
+
+--- Whether two byte strings hold the same bytes.
+public same: (left: []u8, right: []u8) -> (yes: bool) =
+    yes = cmp.compare(left, right) == cmp.equal
+end same
+
+--- Whether `whole` begins with `prefix`.
+public starts: (whole: []u8, prefix: []u8) -> (yes: bool) =
+    yes = false
+    return when lenof whole < lenof prefix
+    yes = same(whole[0..<lenof prefix], prefix)
+end starts
+
+--- Whether `name` is a module path segment: lowercase letters, digits and
+--- underscores, not starting with a digit.
+public is_segment: (name: []u8) -> (yes: bool) =
+    yes = false
+    return when lenof name == 0
+    return when name[0] >= u8('0') and name[0] <= u8('9')
+    for byte in name do
+        lower: bool = byte >= u8('a') and byte <= u8('z')
+        digit: bool = byte >= u8('0') and byte <= u8('9')
+        return when not (lower or digit or byte == u8('_'))
+    end for
+    yes = true
+end is_segment
+
+--- Where the first `byte` is in `whole`, or its length when there is none.
+public find: (whole: []u8, byte: u8) -> (at: usize) =
+    at = mem.find(whole, byte)
+end find

@@ -1,0 +1,255 @@
+-- The recipe, `landin.recipe`: the steps that build a package.
+--
+--     rule NAME
+--         run  PROGRAM WORDS...
+--         set  NAME VALUE
+--     step NAME RULE [from INPUT...] [with INPUT...]
+--         set  NAME VALUE
+--     default STEP...
+--
+-- Every line starts with a keyword; `run` and `set` belong to the `rule` or
+-- `step` before them, and indentation means nothing.  A `run` line is a
+-- word list, started directly and never given to a shell.  In it, `{out}`
+-- is the step's output directory, `{in}` the step's `from` inputs, each a
+-- word, and `{NAME}` what a `set NAME` of the step or of the rule gave;
+-- `{{` and `}}` are single braces.  An input is `packages`, another step's
+-- name, or a path in the project.
+
+import core/mem
+import core/vec
+import hosted/blocking
+import janhaan/refine_build/lifetime
+import janhaan/refine_build/report
+import janhaan/refine_build/text/lines
+import janhaan/refine_build/text/strings
+
+--- A `set` line: a name and the value `{name}` stands for.
+public setting: type = struct
+    name: []u8
+    value: []u8
+    number: usize
+end setting
+
+--- A rule: how to run a program.  `run_number` is 0 while it has no `run`
+--- line.
+public rule: type = struct
+    name: []u8
+    number: usize
+    run: vec.list([]u8)
+    run_number: usize
+    sets: vec.list(setting)
+end rule
+
+--- A step: a rule applied to inputs.  `direct` are its `from` inputs, which
+--- `{in}` names, and `beside` its `with` inputs, which are only made
+--- visible.  `rule_at` is its rule's index once the recipe is checked.
+public step: type = struct
+    name: []u8
+    number: usize
+    rule_name: []u8
+    rule_at: usize
+    direct: vec.list([]u8)
+    beside: vec.list([]u8)
+    sets: vec.list(setting)
+end step
+
+--- A recipe as read and checked.  `defaults` are indices into `steps`.
+public recipe: type = struct
+    rules: vec.list(rule)
+    steps: vec.list(step)
+    defaults: vec.list(usize)
+end recipe
+
+--- The input every step may name: the packages the description needs, and
+--- the package itself, each under its owner/name path.
+public packages: []u8 = "packages"
+
+--- No step has the name asked for.
+public no_such_step: atom
+
+nowhere: atom
+in_rule: atom
+in_step: atom
+--  What a `run` or `set` line belongs to.
+place: type = nowhere | in_rule | in_step
+
+--- Read the recipe in `source`, which is the content of `file`, and check
+--- it.  Everything wrong in it is said, each with its line, and then the
+--- read fails `report.refused`.
+public read: (host: blocking.host, memory: lifetime.memory, file: []u8,
+              source: []u8) -> (result: recipe)
+             ! report.refused | mem.out_of_memory =
+    result = (rules: vec.new(item: rule), steps: vec.new(item: step),
+              defaults: vec.new(item: usize))
+    doc := try lines.read(memory, source)
+    mut default_names := vec.new(item: lines.line)
+    mut wrong: bool = false
+    mut where: place = nowhere
+    for item in vec.used(doc.lines) do
+        read_line(host, memory, file, item, result, where, default_names)
+            else (problem)
+            fail mem.out_of_memory when problem == mem.out_of_memory
+            wrong = true
+        end
+    end for
+    fail report.refused when wrong
+    try check(host, memory, file, result, vec.used(default_names))
+end read
+
+--- The index of the step called `name`.
+public step_named: (value: recipe, name: []u8) -> (index: usize)
+                   ! no_such_step =
+    for item, at in vec.used(value.steps) do
+        if strings.same(item.name, name) then
+            index = at
+            return
+        end if
+    end for
+    fail no_such_step
+end step_named
+
+read_line: (host: blocking.host, memory: lifetime.memory, file: []u8,
+            escaping item: lines.line, inout into: recipe, inout where: place,
+            inout default_names: vec.list(lines.line))
+           -> none ! report.refused | mem.out_of_memory =
+    if item.state <> lines.sound then
+        report.at_line(host, file, item.number, [lines.words_of(item.state)])
+        fail report.refused
+    end if
+    words: [][]u8 = vec.used(item.words)
+    keyword: []u8 = words[0]
+    given: usize = lenof words - 1
+    if strings.same(keyword, "rule") then
+        where = nowhere
+        try wants(host, file, item.number, given == 1,
+                  "`rule` takes one word: `rule NAME`")
+        for other in vec.used(into.rules) do
+            try unlike(host, file, item.number, "rule", other.name, words[1])
+        end for
+        made: rule = (name: words[1], number: item.number,
+                      run: vec.new(item: []u8), run_number: 0,
+                      sets: vec.new(item: setting))
+        try vec.push(into.rules, memory, made)
+        where = in_rule
+    elsif strings.same(keyword, "step") then
+        where = nowhere
+        try wants(host, file, item.number, given >= 2,
+                  "`step` takes a name and a rule: `step NAME RULE from INPUT... with INPUT...`")
+        for other in vec.used(into.steps) do
+            try unlike(host, file, item.number, "step", other.name, words[1])
+        end for
+        mut made: step = (name: words[1], number: item.number,
+                          rule_name: words[2], rule_at: 0,
+                          direct: vec.new(item: []u8),
+                          beside: vec.new(item: []u8),
+                          sets: vec.new(item: setting))
+        mut direct: bool = false
+        mut chosen: bool = false
+        for word in words[3..<lenof words] do
+            if strings.same(word, "from") then
+                direct = true
+                chosen = true
+            elsif strings.same(word, "with") then
+                direct = false
+                chosen = true
+            elsif not chosen then
+                report.at_line(host, file, item.number,
+                               ["`", word,
+                                "` follows the rule's name; write `from` before the inputs `{in}` names and `with` before those only made visible"])
+                fail report.refused
+            elsif direct then
+                try vec.push(made.direct, memory, word)
+            else
+                try vec.push(made.beside, memory, word)
+            end if
+        end for
+        try vec.push(into.steps, memory, made)
+        where = in_step
+    elsif strings.same(keyword, "run") then
+        try wants(host, file, item.number, where <> nowhere,
+                  "`run` belongs to a rule; write `rule NAME` on a line before it")
+        try wants(host, file, item.number, where == in_rule,
+                  "`run` belongs to a rule, and this one follows a step; put it under the step's rule")
+        try wants(host, file, item.number, given >= 1,
+                  "`run` takes the program and its words: `run PROGRAM WORDS...`")
+        last: ptr mut rule = vec.at(into.rules, vec.length(into.rules) - 1)
+            else (problem)
+            _ = problem
+            fail report.refused
+        end
+        if last.val.run_number > 0 then
+            report.at_line(host, file, item.number,
+                           ["a second `run` line in rule `", last.val.name,
+                            "`; a rule runs one program, so make a second rule and a second step"])
+            fail report.refused
+        end if
+        last.val.run_number = item.number
+        for word in words[1..<lenof words] do
+            try vec.push(last.val.run, memory, word)
+        end for
+    elsif strings.same(keyword, "set") then
+        try wants(host, file, item.number, where <> nowhere,
+                  "`set` belongs to a rule or a step; write it on a line after one")
+        try wants(host, file, item.number, given == 2,
+                  "`set` takes a name and one value: `set NAME VALUE`; quote a value with spaces")
+        try wants(host, file, item.number, strings.is_segment(words[1]),
+                  "a `set` name is lowercase letters, digits and `_`")
+        try wants(host, file, item.number,
+                  not strings.same(words[1], "in")
+                  and not strings.same(words[1], "out"),
+                  "`{in}` and `{out}` are the tool's own; choose another name")
+        made: setting = (name: words[1], value: words[2],
+                         number: item.number)
+        if where == in_rule then
+            last: ptr mut rule = vec.at(into.rules, vec.length(into.rules) - 1)
+                else (problem)
+                _ = problem
+                fail report.refused
+            end
+            for other in vec.used(last.val.sets) do
+                try unlike(host, file, item.number, "set", other.name,
+                           words[1])
+            end for
+            try vec.push(last.val.sets, memory, made)
+        else
+            last: ptr mut step = vec.at(into.steps, vec.length(into.steps) - 1)
+                else (problem)
+                _ = problem
+                fail report.refused
+            end
+            for other in vec.used(last.val.sets) do
+                try unlike(host, file, item.number, "set", other.name,
+                           words[1])
+            end for
+            try vec.push(last.val.sets, memory, made)
+        end if
+    elsif strings.same(keyword, "default") then
+        where = nowhere
+        try wants(host, file, item.number, given >= 1,
+                  "`default` takes the steps to run when none is asked for: `default STEP...`")
+        try vec.push(default_names, memory, item)
+    else
+        report.at_line(host, file, item.number,
+                       ["unknown keyword `", keyword,
+                        "`; a recipe line starts with rule, run, set, step or default, and a comment with `--` and a space"])
+        fail report.refused
+    end if
+end read_line
+
+--  Refuse the line with `otherwise` unless `holds`.
+wants: (host: blocking.host, file: []u8, number: usize, holds: bool,
+        otherwise: []u8) -> none ! report.refused =
+    return when holds
+    report.at_line(host, file, number, [otherwise])
+    fail report.refused
+end wants
+
+--  Refuse a name that is already taken among its kind.
+unlike: (host: blocking.host, file: []u8, number: usize, kind: []u8,
+         taken: []u8, name: []u8) -> none ! report.refused =
+    return when not strings.same(taken, name)
+    report.at_line(host, file, number,
+                   ["a second `", kind, " ", name,
+                    "`; give one of the two another name"])
+    fail report.refused
+end unlike

@@ -1,0 +1,359 @@
+-- Running a recipe's steps.
+--
+-- Everything the tool writes is under `.landin` in the project:
+--
+--     .landin/packages/OWNER/NAME     a link to the project itself
+--     .landin/steps/STEP/out          the step's output, fresh each run
+--     .landin/steps/STEP/view         what the step sees
+--
+-- A step's program runs in its view, which holds each of its inputs under
+-- the input's own name: `packages`, another step's output under that
+-- step's name, a project path under that path.  Each is a link.
+
+import core/failure
+import core/io
+import core/region
+import core/text
+import core/vec
+import hosted/blocking
+import janhaan/refine_build/lifetime
+import janhaan/refine_build/description
+import janhaan/refine_build/files
+import janhaan/refine_build/recipe
+import janhaan/refine_build/report
+import janhaan/refine_build/text/strings
+
+--- What a run is given besides the two files: the names they were read
+--- from, for what is said about them, and the `refine` that `refine` in a
+--- `run` line means, empty for the one on PATH.
+public request: type = struct
+    package_file: []u8
+    recipe_file: []u8
+    refine: []u8
+end request
+
+--- Check what only the project's directory can say: that an input which
+--- is no step is a path that exists, and that no step is named as a path
+--- of the project is, since an input of that name would mean either.
+--- Everything wrong is said, and then the check fails.  The paths it
+--- looks at live in a region of its own over `parent`, which ends with it.
+public fits: (host: blocking.host, parent: lifetime.parent, asked: request,
+              plan: recipe.recipe) -> none ! report.refused =
+    mut ledger: lifetime.ledger = zeroed
+    memory := region.over(ledger, parent)
+    defer region.release(ledger, parent)
+    project: []u8 = try here(host, memory)
+    mut wrong: bool = false
+    for taken in vec.used(plan.steps) do
+        at_name: []u8 = try glued(host, memory, [project, "/", taken.name])
+        if try kind(host, at_name) <> files.absent then
+            report.at_line(host, asked.recipe_file, taken.number,
+                           ["step `", taken.name,
+                            "` has the name of a path in the project, so an input `",
+                            taken.name,
+                            "` could mean either; give the step another name"])
+            wrong = true
+        end if
+        for name in vec.used(taken.direct) do
+            there: bool = try present(host, memory, asked, plan, project,
+                                      taken, name)
+            if not there then wrong = true end if
+        end for
+        for name in vec.used(taken.beside) do
+            there: bool = try present(host, memory, asked, plan, project,
+                                      taken, name)
+            if not there then wrong = true end if
+        end for
+    end for
+    fail report.refused when wrong
+end fits
+
+--- Run the steps of `plan` that `sequence` lists, in its order, for the
+--- package `about`.  The first step that cannot be started or does not end
+--- with code 0 is said, with its name, and ends the run.  What every step
+--- shares is made in `memory`; each step's own paths and words live in a
+--- region over `parent` that ends with the step.
+public run: (host: blocking.host, memory: lifetime.memory,
+             parent: lifetime.parent, asked: request,
+             about: description.description, plan: recipe.recipe,
+             sequence: []usize) -> none ! report.refused =
+    project: []u8 = try here(host, memory)
+    work: []u8 = try glued(host, memory, [project, "/.landin"])
+    owned: []u8 = try glued(host, memory, [work, "/packages/", about.owner])
+    try made(host, owned)
+    try linked(host, "../../..",
+               try glued(host, memory, [owned, "/", about.name]))
+    changer: []u8 = files.program(host, memory, "env") else (problem)
+        _ = problem
+        report.say(host,
+                   ["no `env` on PATH; refine-build starts each step through `env -C DIRECTORY`, so that it runs in its view"])
+        fail report.refused
+    end
+    mut variables := vec.new(item: io.variable)
+    for at in usize(0)..<io.variable_count(host) do
+        item: io.variable = io.variable_at(host, at) else (problem)
+            _ = problem
+            break
+        end
+        vec.push(variables, memory, item) else (problem)
+            gave_up(host, "the environment", problem)
+            fail report.refused
+        end
+    end for
+    for index in sequence do
+        taken: recipe.step = vec.get(plan.steps, index) else (problem)
+            gave_up(host, "the recipe", problem)
+            fail report.refused
+        end
+        how: recipe.rule = vec.get(plan.rules, taken.rule_at) else (problem)
+            gave_up(host, "the recipe", problem)
+            fail report.refused
+        end
+        try run_step(host, parent, asked, plan, project, work, changer,
+                     vec.used(variables), how, taken)
+    end for
+end run
+
+--  Run one step.  Everything it allocates is in a region of its own,
+--  released when the step has ended, however it ended.
+run_step: (host: blocking.host, parent: lifetime.parent, asked: request,
+           plan: recipe.recipe, project: []u8, work: []u8, changer: []u8,
+           variables: []io.variable, how: recipe.rule, taken: recipe.step)
+          -> none ! report.refused =
+    mut ledger: lifetime.ledger = zeroed
+    memory := region.over(ledger, parent)
+    defer region.release(ledger, parent)
+    io.write(host, io.out(host), "step ") else none
+    io.write(host, io.out(host), taken.name) else none
+    io.write(host, io.out(host), "\n") else none
+    home: []u8 = try glued(host, memory, [work, "/steps/", taken.name])
+    out: []u8 = try glued(host, memory, [home, "/out"])
+    view: []u8 = try glued(host, memory, [home, "/view"])
+    files.remove_all(host, memory, home) else (problem)
+        gave_up(host, home, problem)
+        fail report.refused
+    end
+    try made(host, out)
+    try made(host, view)
+    for name in vec.used(taken.direct) do
+        try shown(host, memory, plan, project, work, view, name)
+    end for
+    for name in vec.used(taken.beside) do
+        try shown(host, memory, plan, project, work, view, name)
+    end for
+    mut words := vec.new(item: []u8)
+    for word in vec.used(how.run) do
+        if strings.same(word, "{in}") then
+            for name in vec.used(taken.direct) do
+                vec.push(words, memory, name) else (problem)
+                    gave_up(host, taken.name, problem)
+                    fail report.refused
+                end
+            end for
+        else
+            whole: []u8 = try expanded(host, memory, how, taken, out, word)
+            vec.push(words, memory, whole) else (problem)
+                gave_up(host, taken.name, problem)
+                fail report.refused
+            end
+        end if
+    end for
+    named: [][]u8 = vec.used(words)
+    tool: []u8 = try program(host, memory, asked, taken, view, named[0])
+    mut arguments := vec.new(item: text.host_string)
+    leading: [3][]u8 = ["-C", view, tool]
+    for word in leading do
+        vec.push(arguments, memory, text.host_over(word)) else (problem)
+            gave_up(host, taken.name, problem)
+            fail report.refused
+        end
+    end for
+    for word in named[1..<lenof named] do
+        vec.push(arguments, memory, text.host_over(word)) else (problem)
+            gave_up(host, taken.name, problem)
+            fail report.refused
+        end
+    end for
+    started: io.child = io.spawn(host, text.host_over(changer),
+                                 vec.used(arguments), variables,
+                                 io.inheriting) else (problem)
+        report.say(host,
+                   ["step `", taken.name, "`: could not start `", named[0],
+                    "`: ", failure.words(problem)])
+        fail report.refused
+    end
+    ended: io.ending = io.wait(host, started) else (problem)
+        report.say(host,
+                   ["step `", taken.name, "`: lost `", named[0], "`: ",
+                    failure.words(problem)])
+        fail report.refused
+    end
+    match ended.how
+        io.exited(code): begin
+            return when code == 0
+            mut room: [16]u8 = zeroed
+            mut digits := text.over(room)
+            text.append_i32(digits, code) else none
+            report.say(host,
+                       ["step `", taken.name, "` failed: `", named[0],
+                        "` ended with code ", text.used(digits)])
+        end
+        io.signalled:
+            report.say(host,
+                       ["step `", taken.name, "` failed: `", named[0],
+                        "` was ended by a signal"])
+    end match
+    fail report.refused
+end run_step
+
+--  Make the input `name` visible in `view` under its own name.
+shown: (host: blocking.host, memory: lifetime.memory, plan: recipe.recipe,
+        project: []u8, work: []u8, view: []u8, name: []u8)
+       -> none ! report.refused =
+    place: []u8 = try glued(host, memory, [view, "/", name])
+    if strings.same(name, recipe.packages) then
+        try linked(host, try glued(host, memory, [work, "/packages"]), place)
+        return
+    end if
+    _ = recipe.step_named(plan, name) else (problem)
+        _ = problem
+        mut cut: usize = lenof name
+        while cut > 0 and name[cut - 1] <> u8('/') do dec cut end while
+        if cut > 1 then
+            try made(host,
+                     try glued(host, memory, [view, "/", name[0..<cut - 1]]))
+        end if
+        try linked(host, try glued(host, memory, [project, "/", name]), place)
+        return
+    end
+    try linked(host, try glued(host, memory, [work, "/steps/", name, "/out"]),
+               place)
+end shown
+
+--  A word of the `run` line with its placeholders filled in.
+expanded: (host: blocking.host, memory: lifetime.memory, how: recipe.rule,
+           taken: recipe.step, out: []u8, word: []u8)
+          -> (whole: []u8) ! report.refused =
+    whole = ""
+    mut at: usize = 0
+    loop do
+        part: recipe.piece = recipe.piece_at(word, at)
+        break when part.kind == recipe.ended or part.kind == recipe.broken
+        at = part.after
+        bytes: []u8 = word[part.start..<part.stop]
+        if part.kind == recipe.plain then
+            whole = try glued(host, memory, [whole, bytes])
+        elsif strings.same(bytes, "out") then
+            whole = try glued(host, memory, [whole, out])
+        else
+            value: []u8 = recipe.value_of(how, taken, bytes) else (problem)
+                _ = problem
+                ""
+            end
+            whole = try glued(host, memory, [whole, value])
+        end if
+    end loop
+end expanded
+
+--  The program a `run` line's first word names: the calling `refine`, a
+--  path in the step's view, or a program on PATH.
+program: (host: blocking.host, memory: lifetime.memory, asked: request,
+          taken: recipe.step, view: []u8, word: []u8)
+         -> (path: []u8) ! report.refused =
+    if strings.same(word, "refine") and lenof asked.refine > 0 then
+        path = try glued(host, memory, [asked.refine])
+        return
+    end if
+    if strings.find(word, u8('/')) < lenof word then
+        if word[0] == u8('/') then
+            path = try glued(host, memory, [word])
+        else
+            path = try glued(host, memory, [view, "/", word])
+        end if
+        if try kind(host, path) == files.absent then
+            report.say(host,
+                       ["step `", taken.name, "`: no program at `", word,
+                        "` in the step's view; a program given by a path is an input of the step, or inside one"])
+            fail report.refused
+        end if
+        return
+    end if
+    path = files.program(host, memory, word) else (problem)
+        _ = problem
+        if strings.same(word, "refine") then
+            report.say(host,
+                       ["step `", taken.name,
+                        "`: no `refine` on PATH; say which one with `--refine PATH`"])
+        else
+            report.say(host,
+                       ["step `", taken.name, "`: no program `", word,
+                        "` on PATH"])
+        end if
+        fail report.refused
+    end
+end program
+
+--  Whether the input `name` of `taken` is `packages`, a step, or a path
+--  the project has; when it is none, that is said.
+present: (host: blocking.host, memory: lifetime.memory, asked: request,
+          plan: recipe.recipe, project: []u8, taken: recipe.step, name: []u8)
+         -> (yes: bool) ! report.refused =
+    yes = true
+    return when strings.same(name, recipe.packages)
+    _ = recipe.step_named(plan, name) else (problem)
+        _ = problem
+        at_name: []u8 = try glued(host, memory, [project, "/", name])
+        if try kind(host, at_name) == files.absent then
+            report.at_line(host, asked.recipe_file, taken.number,
+                           ["the input `", name, "` of step `", taken.name,
+                            "` is neither a step nor a path in the project; an input is `packages`, a step's name, or a file or directory that exists"])
+            yes = false
+        end if
+        0
+    end
+end present
+
+--  Say that `what` could not be dealt with and why.
+gave_up: (host: blocking.host, what: []u8, problem: failure.reason)
+         -> none =
+    report.say(host, [what, ": ", failure.words(problem)])
+end gave_up
+
+here: (host: blocking.host, memory: lifetime.memory) -> (path: []u8)
+      ! report.refused =
+    path = files.working(host, memory) else (problem)
+        gave_up(host, "the working directory", problem)
+        fail report.refused
+    end
+end here
+
+glued: (host: blocking.host, memory: lifetime.memory, parts: [][]u8)
+       -> (whole: []u8) ! report.refused =
+    whole = strings.joined(memory, parts) else (problem)
+        gave_up(host, "a path", problem)
+        fail report.refused
+    end
+end glued
+
+kind: (host: blocking.host, path: []u8) -> (what: files.found)
+      ! report.refused =
+    what = files.kind_of(host, path) else (problem)
+        gave_up(host, path, problem)
+        fail report.refused
+    end
+end kind
+
+made: (host: blocking.host, path: []u8) -> none ! report.refused =
+    files.make_all(host, path) else (problem)
+        gave_up(host, path, problem)
+        fail report.refused
+    end
+end made
+
+linked: (host: blocking.host, target: []u8, path: []u8)
+        -> none ! report.refused =
+    files.link(host, target, path) else (problem)
+        gave_up(host, path, problem)
+        fail report.refused
+    end
+end linked
