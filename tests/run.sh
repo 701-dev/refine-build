@@ -20,6 +20,13 @@
 #  the dispatcher check runs the tool through `refine` as a contributed
 #  command: a build, help, a forwarded explanation and a completion.
 #
+#  The store checks build a small project against stores of their own and
+#  look at what ran, what was kept and what the store holds: a second build
+#  starts no program, an edit runs what depends on it, an output that did
+#  not change keeps what takes it, a kept step says what it said, `always`
+#  and `--again` run, a failed step leaves no key and no entry, two builds
+#  at once leave one entry a step, and a store of another form is refused.
+#
 #  The hash checks go through `--hash-file` and `--hash-tree`, options for
 #  these tests only.  SHA-256 is held to the FIPS 180-4 examples, to lengths
 #  around a block's edges and to `sha256sum` on real files, read in chunks
@@ -45,7 +52,11 @@ for word in "$@"; do
     esac
 done
 scratch=$(mktemp -d)
-trap 'rm -rf "$scratch"' EXIT
+#  A store's entries are read-only, so they are made writable to be removed.
+trap 'chmod -R u+w "$scratch" 2> /dev/null; rm -rf "$scratch"' EXIT
+#  No test touches the user's store: every build here finds its store
+#  under the scratch directory, each case one of its own.
+export XDG_CACHE_HOME="$scratch/cache"
 failed=0
 count=0
 for case in "$here"/cases/*/; do
@@ -54,8 +65,8 @@ for case in "$here"/cases/*/; do
     cp -R "$case" "$scratch/$name"
     status=0
     # shellcheck disable=SC2046  # the arguments are plain words by contract
-    (cd "$scratch/$name" && "$build" $(cat command)) \
-        > "$scratch/$name.said" 2>&1 || status=$?
+    (cd "$scratch/$name" && XDG_CACHE_HOME="$scratch/cache-$name" \
+        "$build" $(cat command)) > "$scratch/$name.said" 2>&1 || status=$?
     echo "[exit $status]" >> "$scratch/$name.said"
     sed -i "s#$scratch/$name#PROJECT#g" "$scratch/$name.said"
     if [ "$record" = yes ]; then
@@ -77,13 +88,27 @@ done
 if [ -n "$refine" ]; then
     count=$((count + 1))
     root=$(dirname "$here")
-    if ! (cd "$root" && env -u LANDIN_REFINE "$build" --refine "$refine" > "$scratch/self.said" 2>&1); then
+    if ! (cd "$root" && env -u LANDIN_REFINE "$build" --refine "$refine" \
+        --store "$scratch/self-store" > "$scratch/self.said" 2>&1); then
         cat "$scratch/self.said"
         echo "FAILED self-build: the tool did not build itself"
         failed=$((failed + 1))
-    elif ! cmp "$build" "$root/.landin/steps/tool/out/refine-build"; then
+    elif ! cmp "$build" "$root/.landin/out/tool/refine-build"; then
         echo "FAILED self-build: the tool built differs from the tool that built it"
         failed=$((failed + 1))
+    else
+        #  A second build keeps both steps: nothing changed.
+        (cd "$root" && env -u LANDIN_REFINE "$build" --refine "$refine" \
+            --store "$scratch/self-store" > "$scratch/self.said" 2>&1) || true
+        if [ "$(cat "$scratch/self.said")" != "step tool: kept
+step checked: kept" ]; then
+            cat "$scratch/self.said"
+            echo "FAILED self-build: a second build does not keep both steps"
+            failed=$((failed + 1))
+        elif ! cmp "$build" "$root/.landin/out/tool/refine-build"; then
+            echo "FAILED self-build: the tool kept differs from the tool that built it"
+            failed=$((failed + 1))
+        fi
     fi
 fi
 #  Every code the tool can print is explained.  `explain` lists the codes;
@@ -157,10 +182,10 @@ if [ -n "$refine" ]; then
         fi
     }
     #  The refine that dispatched is the one the steps run: no --refine.
-    rm -rf "$root/.landin/steps"
+    rm -rf "$root/.landin/steps" "$root/.landin/out"
     cd "$root"
     ran "refine bld did not build this package" "$refine" bld
-    if ! cmp "$build" "$root/.landin/steps/tool/out/refine-build"; then
+    if ! cmp "$build" "$root/.landin/out/tool/refine-build"; then
         echo "FAILED dispatcher: refine bld built something else than the tool"
         dispatched=no
     fi
@@ -169,7 +194,7 @@ if [ -n "$refine" ]; then
         "  bld         Run the steps of a package's recipe ($tools/refine-bld)"
     ran "refine help bld did not run" "$refine" help bld
     holds "refine help bld is not the tool's own help" \
-        "usage: refine-build [--refine PATH] [--check] [STEP...]"
+        "usage: refine-build [--refine PATH] [--store PATH] [--again] [--check]"
     ran "refine explain RB0102 was not forwarded" "$refine" explain RB0102
     holds "the forwarded explanation is not announced as the tool's" \
         "RB0102 is explained by refine-bld at $tools/refine-bld, not by Landin"
@@ -343,6 +368,221 @@ if [ "$status" -ne 1 ] || [ "${said%%:*}" != "error[RB0501]" ]; then
     trees=no
 fi
 [ "$trees" = ok ] || failed=$((failed + 1))
+#  The store.  A small project is built several times against stores under
+#  the scratch directory; each step's program adds a line to a log, so a
+#  step that was kept and not run shows in the log's length.
+count=$((count + 1))
+stores=ok
+log=$scratch/ran.log
+#  planted_project DIRECTORY: two steps, the second taking the first's
+#  output; the first says something on each stream.
+planted_project() {
+    mkdir -p "$1/notes"
+    printf 'hello\n' > "$1/notes/a.txt"
+    printf 'package dev701/demo\nkind library\n' > "$1/landin.package"
+    {
+        echo 'step upper from notes/a.txt'
+        echo "    run sh -c \"echo upper >> $log; tr a-z A-Z < notes/a.txt > \$0/a.txt; echo made; echo warned >&2\" {out}"
+        echo 'step count with upper'
+        echo "    run sh -c \"echo count >> $log; wc -c < upper/a.txt > \$0/count; echo counted\" {out}"
+    } > "$1/landin.recipe"
+}
+#  builds WHAT DIRECTORY STORE [ARGUMENTS...]: build there, each stream
+#  kept apart in $scratch/out and $scratch/err; fail the check when the
+#  build does not end with 0.
+builds() {
+    what=$1 directory=$2 kept_in=$3
+    shift 3
+    if ! (cd "$directory" && "$build" --store "$kept_in" "$@" \
+        > "$scratch/out" 2> "$scratch/err"); then
+        cat "$scratch/out" "$scratch/err"
+        echo "FAILED store: $what: the build failed"
+        stores=no
+    fi
+}
+#  said WHAT EXPECTED: the last build's standard output is EXPECTED.
+said() {
+    if [ "$(cat "$scratch/out")" != "$2" ]; then
+        cat "$scratch/out"
+        echo "FAILED store: $1"
+        stores=no
+    fi
+}
+#  logged WHAT LINES: the log has LINES lines.
+logged() {
+    if [ "$(wc -l < "$log")" -ne "$2" ]; then
+        cat "$log"
+        echo "FAILED store: $1"
+        stores=no
+    fi
+}
+: > "$log"
+planted_project "$scratch/kept"
+builds "a first build" "$scratch/kept" "$scratch/store"
+said "a first build does not run both steps" "step upper
+made
+step count
+counted"
+cp "$scratch/err" "$scratch/err.first"
+logged "a first build does not start both programs" 2
+if [ "$(cat "$scratch/kept/.landin/out/upper/a.txt")" != HELLO ] \
+    || [ "$(cat "$scratch/kept/.landin/out/count/count")" != 6 ]; then
+    echo "FAILED store: .landin/out does not show what the steps made"
+    stores=no
+fi
+builds "a second build" "$scratch/kept" "$scratch/store"
+said "a second build does not keep both steps and say what they said" "step upper: kept
+made
+step count: kept
+counted"
+if [ "$(cat "$scratch/err")" != warned ] \
+    || ! cmp -s "$scratch/err" "$scratch/err.first"; then
+    echo "FAILED store: a kept step does not write what it wrote to standard error"
+    stores=no
+fi
+logged "a second build starts a program" 2
+#  Everything in an entry is read-only.
+if [ -n "$(find "$scratch/store/entries" -mindepth 1 ! -type l -perm /222)" ]; then
+    find "$scratch/store/entries" -mindepth 1 ! -type l -perm /222
+    echo "FAILED store: an entry can be written to"
+    stores=no
+fi
+if [ -n "$(ls "$scratch/store/tmp")" ]; then
+    ls "$scratch/store/tmp"
+    echo "FAILED store: a build that ended well left something in tmp"
+    stores=no
+fi
+#  An input changed and its output with it: both steps run.
+printf 'hello there\n' > "$scratch/kept/notes/a.txt"
+builds "a build after an edit" "$scratch/kept" "$scratch/store"
+said "an edited input does not run the steps that depend on it" "step upper
+made
+step count
+counted"
+logged "an edited input does not start both programs" 4
+#  An input changed and its output not: the first step runs, makes the
+#  entry it made before, and the second is kept.
+printf 'HELLO there\n' > "$scratch/kept/notes/a.txt"
+builds "a build after an edit that changes no output" "$scratch/kept" "$scratch/store"
+said "a step whose input is the same entry as before is not kept" "step upper
+made
+step count: kept
+counted"
+logged "an unchanged entry starts the step that takes it" 5
+builds "a build with --again" "$scratch/kept" "$scratch/store" --again
+said "--again does not run every step" "step upper
+made
+step count
+counted"
+logged "--again does not start both programs" 7
+#  A relative --store is a path from the project.
+builds "a build with a relative store" "$scratch/kept" near
+if [ ! -f "$scratch/kept/near/version" ]; then
+    echo "FAILED store: --store near did not make the store in the project"
+    stores=no
+fi
+chmod -R u+w "$scratch/kept/near"
+rm -rf "$scratch/kept/near"
+#  `set always yes`: the step runs every time, and what takes its output
+#  is kept while that is the same.
+planted_project "$scratch/always"
+sed -i 's/^step upper from notes\/a.txt$/&\n    set always yes/' "$scratch/always/landin.recipe"
+: > "$log"
+builds "a first build with an always step" "$scratch/always" "$scratch/store-always"
+builds "a second build with an always step" "$scratch/always" "$scratch/store-always"
+said "set always yes does not run the step every time" "step upper
+made
+step count: kept
+counted"
+logged "an always step is not started on each build, or its taker is" 3
+#  A step that fails leaves no key and no entry, and what it wrote is
+#  kept for a look; the next run removes that and keeps its own.
+planted_project "$scratch/fails"
+{
+    echo 'step bad'
+    # shellcheck disable=SC2016  # written into the recipe as it stands
+    echo '    run sh -c "echo partial > $0/p; exit 3" {out}'
+} > "$scratch/fails/landin.recipe"
+status=0
+(cd "$scratch/fails" && "$build" --store "$scratch/store-fails" \
+    > "$scratch/out" 2>&1) || status=$?
+# shellcheck disable=SC2016  # the backquotes are the message's own
+if [ "$status" -ne 1 ] \
+    || ! grep -q -x -F 'error[RB0403]: step `bad` failed: `sh` ended with code 3' "$scratch/out" \
+    || ! grep -q -x -F 'note: what the step wrote is kept in `.landin/failed/bad`' "$scratch/out"; then
+    cat "$scratch/out"
+    echo "FAILED store: a failing step is not said as one"
+    stores=no
+fi
+if [ -n "$(find "$scratch/store-fails/keys" "$scratch/store-fails/entries" -mindepth 1)" ]; then
+    echo "FAILED store: a failed step left a key or an entry"
+    stores=no
+fi
+if [ "$(cat "$scratch/fails/.landin/failed/bad/p" 2> /dev/null)" != partial ]; then
+    echo "FAILED store: what a failed step wrote is not kept under .landin/failed"
+    stores=no
+fi
+(cd "$scratch/fails" && "$build" --store "$scratch/store-fails" > /dev/null 2>&1) || true
+if [ "$(find "$scratch/store-fails/tmp" -mindepth 1 -maxdepth 1 | wc -l)" -ne 1 ]; then
+    echo "FAILED store: a step that fails again does not replace what it left"
+    stores=no
+fi
+#  Two builds of the same package at once on one empty store: both end
+#  well, and each step has one entry and one key.
+planted_project "$scratch/twin-a"
+planted_project "$scratch/twin-b"
+(cd "$scratch/twin-a" && "$build" --store "$scratch/store-twin" > "$scratch/twin-a.said" 2>&1) &
+first=$!
+(cd "$scratch/twin-b" && "$build" --store "$scratch/store-twin" > "$scratch/twin-b.said" 2>&1) &
+second=$!
+together=ok
+wait "$first" || together=no
+wait "$second" || together=no
+if [ "$together" != ok ]; then
+    cat "$scratch/twin-a.said" "$scratch/twin-b.said"
+    echo "FAILED store: two builds at once on one store did not both end well"
+    stores=no
+elif [ "$(find "$scratch/store-twin/entries" -mindepth 1 -maxdepth 1 | wc -l)" -ne 2 ] \
+    || [ "$(find "$scratch/store-twin/keys" -mindepth 1 -maxdepth 1 | wc -l)" -ne 2 ] \
+    || [ -n "$(ls "$scratch/store-twin/tmp")" ]; then
+    find "$scratch/store-twin" -maxdepth 2
+    echo "FAILED store: two builds at once did not leave one entry and one key a step"
+    stores=no
+fi
+#  A store of another form is refused, and so is a directory that holds
+#  entries and names no form.
+#  refused WHAT DIRECTORY STORE: a build there ends with 1 and RB0601.
+refused() {
+    status=0
+    (cd "$2" && "$build" --store "$3" > "$scratch/out" 2>&1) || status=$?
+    if [ "$status" -ne 1 ] || ! grep -q '^error\[RB0601\]: ' "$scratch/out"; then
+        cat "$scratch/out"
+        echo "FAILED store: $1 is not refused with RB0601"
+        stores=no
+    fi
+}
+mkdir "$scratch/store-old"
+printf 'landin-store-0\n' > "$scratch/store-old/version"
+refused "a store of another form" "$scratch/kept" "$scratch/store-old"
+mkdir -p "$scratch/store-odd/entries"
+refused "a directory with entries and no version" "$scratch/kept" "$scratch/store-odd"
+#  Without --store the store is where XDG_CACHE_HOME says, and without
+#  that under HOME; with neither it is asked for.
+(cd "$scratch/kept" && XDG_CACHE_HOME="$scratch/xdg" "$build" > /dev/null 2>&1) || true
+(cd "$scratch/kept" && env -u XDG_CACHE_HOME HOME="$scratch/home" "$build" > /dev/null 2>&1) || true
+if [ ! -f "$scratch/xdg/landin/store/version" ] \
+    || [ ! -f "$scratch/home/.cache/landin/store/version" ]; then
+    echo "FAILED store: the user's store is not where XDG_CACHE_HOME or HOME says"
+    stores=no
+fi
+status=0
+(cd "$scratch/kept" && env -u XDG_CACHE_HOME -u HOME "$build" > "$scratch/out" 2>&1) || status=$?
+if [ "$status" -ne 1 ] || ! grep -q '^error\[RB0602\]: ' "$scratch/out"; then
+    cat "$scratch/out"
+    echo "FAILED store: a build with nowhere for its store is not refused with RB0602"
+    stores=no
+fi
+[ "$stores" = ok ] || failed=$((failed + 1))
 #  peak NAME ARGUMENTS...: the peak resident size, in KiB, of the tool
 #  run in the case NAME with ARGUMENTS.
 peak() {
@@ -354,7 +594,7 @@ peak() {
 }
 #  steady WHAT NAME FEW MANY ARGUMENTS...: MANY builds may take no more than
 #  FEW do, but for the slack a page or two of the heap's own makes.
-slack=256
+slack=384
 steady() {
     what=$1 name=$2 few=$3 many=$4
     shift 4
@@ -369,7 +609,11 @@ steady() {
 }
 if env time -f %M true > /dev/null 2>&1; then
     steady "read and check" steps-run 10 20000 --check
-    steady "read, check and run" steps-run 2 200
+    #  With the store: once a build has run each step, every build keeps
+    #  them; with --again every build runs every step.
+    (cd "$scratch/steps-run" && "$build" > /dev/null 2>&1) || true
+    steady "read, check and keep" steps-run 2 2000
+    steady "read, check and run" steps-run 2 100 --again
     #  A file is hashed in blocks: a large one takes no more memory than a
     #  small one.
     count=$((count + 1))

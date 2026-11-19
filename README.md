@@ -5,9 +5,9 @@ written in Landin. It reads a package's description and its recipe and runs
 the recipe's steps. It is a contributed command of `refine`: on PATH as
 `refine-NAME`, it runs as `refine NAME`.
 
-**Status: a prototype.** It reads and checks both files and runs steps one
-after another. It fetches nothing and keeps no store: every run runs every
-step again.
+**Status: a prototype.** It reads and checks both files, runs steps one
+after another and keeps what each made in a store, so a step whose program
+and inputs are what they were is not run again. It fetches nothing.
 
 ## Building it
 
@@ -17,8 +17,9 @@ step again.
 ```
 
 The first line builds the tool by hand. The second has that tool build
-itself from `landin.recipe`, into `.landin/steps/tool/out/refine-build`,
-which is the same file byte for byte.
+itself from `landin.recipe`; `.landin/out/tool/refine-build` is then the
+same file byte for byte. Run the second line again and it runs nothing:
+both steps are kept.
 
 ## Using it
 
@@ -29,6 +30,8 @@ refine-build                 # the recipe's default steps
 refine-build tool            # one step, after the steps it needs
 refine-build --check         # read and check both files, run nothing
 refine-build --refine PATH   # which refine a `run refine ...` line means
+refine-build --store PATH    # which store keeps what the steps made
+refine-build --again         # run every step, whatever the store keeps
 refine-build explain RB0102  # what a code means; `explain` alone lists them
 ```
 
@@ -85,13 +88,20 @@ step tool  compile  with packages
     set  entry  cmd/build
     set  name   refine-build
 
+step notes  from doc/notes.txt
+    run  cp {in} {out}
+    set  always yes
+
 default tool
 ```
 
 - Every line starts with a keyword. `run` and `set` belong to the `rule`
   or `step` before them; indentation means nothing.
+- A step names a rule after its own name, or it names none and has a `run`
+  line of its own, as `notes` has. No rule is called `from` or `with`.
 - `run` is a list of words, started directly. No shell reads it.
 - `{out}` is the step's own output directory, empty when the step starts.
+  When the program ends with 0, it becomes the step's entry in the store.
   `{in}` is the step's `from` inputs, each as a word. `{name}` is what
   `set name` gave, the step's before the rule's. `{{` and `}}` are braces.
 - An input is `packages`, another step's name, or a path in the project.
@@ -103,8 +113,55 @@ default tool
   a word with a `/` is a path in the view, anything else is found on PATH.
 - A word in double quotes may hold spaces and takes Landin's escapes. A
   word that is exactly `--` starts a comment, so `--root` is a word.
+- `set always yes` under a step is the tool's own: the step runs on every
+  build. A step that flashes a board or asks a clock wants it.
+- A step's program reads nothing from standard input.
 
-Everything the tool writes is under `.landin/`.
+In the project, everything the tool writes is under `.landin/`:
+
+| Path | What it is |
+|---|---|
+| `.landin/out/STEP` | A link to what the step made, in the store. |
+| `.landin/steps/STEP/view` | What the step's program saw. |
+| `.landin/failed/STEP` | A link to what a step wrote before it failed, until it runs again. |
+| `.landin/packages` | This package under its `owner/name`. |
+
+## The store
+
+What a step makes is kept by content, per user, in
+`$XDG_CACHE_HOME/landin/store`, or `$HOME/.cache/landin/store` without
+that variable, or where `--store PATH` says.
+
+| In the store | What it is |
+|---|---|
+| `version` | The store's form, `landin-store-1`. A store of another form is refused. |
+| `entries/HASH/` | One output: a directory tree named by its content hash, read-only. |
+| `keys/KEY` | The entry a step made and what its program wrote, under the step's key. |
+| `tmp/` | Outputs being written. Nothing here is ever taken for an entry. |
+| `lock` | Held while an output is renamed into `entries` or a key into `keys`, and never while a step runs. |
+
+A step's key is the SHA-256 of what its program is, the words it is given
+and the content of each input. Before a step runs, the tool makes its key:
+
+- **The store knows the key and has the entry:** nothing runs. The tool
+  says `step NAME: kept`, writes what the program wrote then to the same
+  two streams, and points `.landin/out/NAME` at the entry.
+- **Otherwise the step runs.** Its output is hashed and becomes an entry,
+  and the key is written. An output that is already an entry is dropped,
+  so a step that makes what it made before keeps every step after it.
+- **A step that fails stores nothing.** What it wrote stays in `tmp`, and
+  `.landin/failed/NAME` points at it.
+
+What a program is: for `refine`, what `refine version --json` says of its
+source, mode and dirtiness, and the content of the library it names; for
+any other program, the content of its executable file. An input is a
+step's entry, a file's or directory's content, or for `packages` the whole
+checkout without `.landin` and the version control's directory.
+
+`store/store.ldn` and `steps/keys.ldn` give both forms exactly.
+
+Everything in a store can be made again, so it may be removed whole. Its
+entries are read-only: `chmod -R u+w` it first.
 
 ## What is here
 
@@ -118,7 +175,8 @@ Everything the tool writes is under `.landin/`.
 | `lifetime/` | How long memory lives: the regions of the process, one build and one step. |
 | `description/` | Reading and checking `landin.package`. |
 | `recipe/` | Reading and checking `landin.recipe`, placeholders, the steps' order. |
-| `steps/` | Views, output directories and running each step's program. |
+| `steps/` | Views, a step's key, running its program and keeping or taking what the store has. |
+| `store/` | The store: entries by content, keys, and the lock. |
 | `files/` | Whole files, directory trees, links, and finding a program on PATH. |
 | `hash/sha256/` | SHA-256, on the language alone, so that it can become a library. An integrity hash; it makes no constant-time claim. |
 | `hash/file/` | A file's content hash, read in blocks. |
@@ -140,6 +198,14 @@ tests/run.sh .landin/bootstrap/refine-build path/to/refine
 Each case under `tests/cases` is a project; the script compares what the
 tool says and how it ends with the case's `expected`. With a refine given,
 a further check has the tool build itself and compares the two executables.
+
+The store is checked with a small project built against stores of its
+own: a second build starts no program, an edit runs what depends on it, an
+output that did not change keeps the step that takes it, a kept step says
+what it said, `always` and `--again` run, a failed step leaves no key and
+no entry, two builds at once leave one entry a step, entries are
+read-only, and a store of another form is refused. No test touches the
+user's store.
 
 It then asks the tool to explain every code it lists, and holds that list
 to `codes/codes.ldn` and to the codes the cases expect. With a refine, it
@@ -165,7 +231,7 @@ each have to change it.
 
 ## Hashes
 
-No build uses a hash yet; they are the ground the store will stand on. A
+The store stands on two hashes. A
 file's content hash is the SHA-256 of its bytes. A tree's is the SHA-256
 of one record for everything under its root, in the byte order of the
 paths: what it is, its path, and for a file the length and SHA-256 of its
@@ -177,7 +243,9 @@ than the owner's execute bit do not count, and an empty directory does.
 
 Nothing is freed block by block. Every allocation belongs to the process,
 to one build or to one step, each a region over the heap that is released
-when it ends; `lifetime/lifetime.ldn` says how. A routine that allocates is
+when it ends; `lifetime/lifetime.ldn` says how. A step that is kept has a
+region as one that runs has: its key file and what it says again live
+there. A routine that allocates is
 given the region it allocates from, so a build can be repeated in one
 process, as a watch mode will, without the memory in use growing.
 
@@ -186,7 +254,21 @@ process, as a watch mode will, without the memory in use growing.
 - POSIX hosts only: links come from `platform/posix`.
 - Each step is started through `env -C`, which needs GNU coreutils. The
   Landin library cannot yet start a program in another directory.
-- Steps run one at a time, and all of them on every run.
+- Steps run one at a time.
+- A step's key does not cover everything a program can depend on, so the
+  store keeps a step in these cases although it would make something else:
+  - the assembler and the linker `refine` finds on PATH have changed;
+  - a shared library a program loads has changed;
+  - a variable of the environment has changed, which every step is given
+    whole;
+  - a file the program reads outside its view has changed.
+  `--again` runs everything.
+- `packages` is the whole checkout, so an edit to any file of it, a README
+  included, runs every step that takes `packages`.
+- Two builds at once in one project directory are not guarded against each
+  other: they share `.landin/`. Two projects on one store are.
+- Nothing removes what the store no longer needs, nor what a build that was
+  killed left in `tmp`.
 - It is built and tested with a development build of `refine` from Landin's
   main branch. No released `refine` has been tried.
 
@@ -200,7 +282,7 @@ run in this directory, does that stage's part of the two files:
 2. Builds the `packages` view and runs the `tool` and `checked` steps,
    giving the same `refine-build` that `bootstrap.sh` gives. **Done.**
 3. Keeps each step's output in a store keyed by its inputs, so a second run
-   does nothing.
+   does nothing. **Done.**
 
 ## Licence
 

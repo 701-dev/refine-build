@@ -1,0 +1,317 @@
+-- A step's key: one SHA-256 that is the same whenever the step's program,
+-- its words and its inputs are the same, so that the store can say what
+-- such a step made before.  It is the SHA-256 of this byte string, which
+-- another program can make as well:
+--
+--     the 14 bytes `landin-step-1` and a line feed, which name the form
+--     then fields, each one letter, the eight bytes of a length, most
+--     significant first, and that many bytes:
+--
+--         `p`   what the program is: see below
+--         `w`   one for each word of the `run` line as the program is
+--               given it, the first included, in their order, with
+--               `{out}` as the single byte 0
+--         then for each input of the step, `from` and `with` alike, in
+--         the order of their names compared byte by byte:
+--         `n`   the input's name
+--         `h`   what it holds: one letter and a SHA-256,
+--               `s` a step's entry and its content hash,
+--               `t` a directory of the project and its tree hash,
+--               `f` a file of the project, or `x` one its owner may
+--               execute, and the hash of its content,
+--               `p` for `packages`, the tree hash of the project without
+--               `.landin`, `.git`, `.hg`, `.svn` and `.jj` in its root
+--         `a`   after the `h` of `packages` only: the package's
+--               OWNER/NAME, which is where the view shows it
+--
+-- What a program is, the `p` field:
+--
+--     the 5 bytes `file` and a line feed, and the 32 bytes of the SHA-256
+--     of the executable file, for every program but `refine`;
+--
+--     for the word `refine`, the 7 bytes `refine` and a line feed, then
+--     what `refine version --json` says of itself, each with a line feed:
+--     its `source_digest`, its `mode` and its `dirty`, and then the 64
+--     hexadecimal digits of the tree hash of each of `core`, `hosted` and
+--     `platform` in the library it names, those that are there.  A refine
+--     that does not answer, names no digest or says it is dirty also gets
+--     a line `file` and the digits of its executable's hash.
+--
+-- What the key leaves out is said in the README: the assembler and the
+-- linker `refine` finds on PATH, the environment, and the shared
+-- libraries a program loads.
+
+import core/cmp
+import core/io
+import core/region
+import core/sort
+import core/text
+import core/vec
+import hosted/blocking
+import platform/posix
+import dev701/refine_build/codes
+import dev701/refine_build/hash/file
+import dev701/refine_build/hash/sha256
+import dev701/refine_build/hash/tree
+import dev701/refine_build/lifetime
+import dev701/refine_build/recipe
+import dev701/refine_build/report
+import dev701/refine_build/text/strings
+
+--  The form's name, which every key's byte string starts with.
+key_form: []u8 = "landin-step-1\n"
+
+--  What is in the project's root and is no part of the package.
+left_out: [5][]u8 = [".landin", ".git", ".hg", ".svn", ".jj"]
+
+--  The key of the step `taken`, whose program is the file `tool` and whose
+--  words are `words`.  `common` already holds what `learned` finds out
+--  for every step.  What this needs is made in `memory`.
+key_of: (host: blocking.host, memory: lifetime.memory,
+         parent: lifetime.parent, plan: recipe.recipe, common: shared,
+         results: []made_by, taken: recipe.step, tool: []u8, words: [][]u8)
+        -> (key: sha256.digest) ! report.refused =
+    mut running := sha256.start()
+    sha256.add(running, key_form)
+    if strings.same(words[0], "refine") then
+        field(running, u8('p'), common.refine_is)
+    else
+        held: file.content = try file.of(host, tool, 0)
+        field(running, u8('p'),
+              try glued(host, memory, ["file\n", held.sum[0..<32]]))
+    end if
+    for word in words do field(running, u8('w'), word) end for
+    mut names := vec.new(item: []u8)
+    for name in vec.used(taken.direct) do
+        try noted(host, memory, names, try glued(host, memory, [name]))
+    end for
+    for name in vec.used(taken.beside) do
+        try noted(host, memory, names, try glued(host, memory, [name]))
+    end for
+    order: usize = 0
+    sort.sort_by(vec.used(names), order, earlier)
+    mut before: []u8 = ""
+    for name, at in vec.used(names) do
+        --  An input named twice is one input.
+        continue when at > 0 and strings.same(name, before)
+        before = name
+        field(running, u8('n'), name)
+        if strings.same(name, recipe.packages) then
+            holds(running, u8('p'), common.packages_sum)
+            field(running, u8('a'),
+                  try glued(host, memory, [common.owner, "/", common.name]))
+            continue
+        end if
+        index: usize = recipe.step_named(plan, name) else (problem)
+            _ = problem
+            path: []u8 = try glued(host, memory, [common.project, "/", name])
+            try holds_path(host, parent, running, path)
+            continue
+        end
+        holds(running, u8('s'), results[index].sum)
+    end for
+    key = sha256.finish(running)
+end key_of
+
+--  Find out what the key of a step with these inputs and this first word
+--  needs and every step shares, unless it is known: the hash of
+--  `packages`, and what the refine at `tool` is.  It is noted in `common`
+--  and lives as long as `lasting`.
+learned: (host: blocking.host, lasting: lifetime.memory,
+          parent: lifetime.parent, inout common: shared, taken: recipe.step,
+          tool: []u8, word: []u8) -> none ! report.refused =
+    mut wanted: bool = false
+    for name in vec.used(taken.direct) do
+        if strings.same(name, recipe.packages) then wanted = true end if
+    end for
+    for name in vec.used(taken.beside) do
+        if strings.same(name, recipe.packages) then wanted = true end if
+    end for
+    if wanted and not common.packages_known then
+        common.packages_sum = try tree.of_tree(host, parent, common.project,
+                                               left_out[0..<5])
+        common.packages_known = true
+    end if
+    if strings.same(word, "refine") and not common.refine_known then
+        common.refine_is = try refine_is(host, lasting, parent,
+                                         common.variables, tool)
+        common.refine_known = true
+    end if
+end learned
+
+--  Take a field into the hash: its letter, its length and its bytes.
+field: (inout running: sha256.state, letter: u8, bytes: []u8) -> none =
+    mut front: [9]u8 = zeroed
+    front[0] = letter
+    length: u64 = u64(lenof bytes)
+    for at in usize(0)..<8 do
+        front[at + 1] = u8((length >> u64(56 - 8 * at)) & 0xff)
+    end for
+    sha256.add(running, front[0..<9])
+    sha256.add(running, bytes)
+end field
+
+--  Take an `h` field into the hash: what an input holds.
+holds: (inout running: sha256.state, letter: u8, sum: sha256.digest)
+       -> none =
+    mut bytes: [33]u8 = zeroed
+    bytes[0] = letter
+    for at in usize(0)..<32 do bytes[at + 1] = sum[at] end for
+    field(running, u8('h'), bytes[0..<33])
+end holds
+
+--  Take what the project's file or directory at `path` holds into the
+--  hash, a link followed.
+holds_path: (host: blocking.host, parent: lifetime.parent,
+             inout running: sha256.state, path: []u8)
+            -> none ! report.refused =
+    status: posix.status = posix.status_at(posix.working_directory,
+                                           text.host_over(path), true)
+        else (problem)
+        report.at_line(host, codes.file_unread, path, 0,
+                       [posix.words(problem)])
+        fail report.refused
+    end
+    if status.kind == posix.directory then
+        whole: [][]u8 = []
+        holds(running, u8('t'), try tree.of_tree(host, parent, path, whole))
+        return
+    end if
+    held: file.content = try file.of(host, path, 0)
+    letter: u8 = if status.permissions & 0o100 <> 0 then u8('x')
+                 else u8('f') end if
+    holds(running, letter, held.sum)
+end holds_path
+
+noted: (host: blocking.host, memory: lifetime.memory,
+        inout names: vec.list([]u8), escaping name: []u8)
+       -> none ! report.refused =
+    vec.push(names, memory, name) else (problem)
+        gave_up(host, name, problem)
+        fail report.refused
+    end
+end noted
+
+--  Whether the name `left` comes before `right`, byte by byte.
+earlier: (by: usize, left: []u8, right: []u8) -> (yes: bool) =
+    _ = by
+    yes = cmp.compare(left, right) == cmp.less
+end earlier
+
+--  What the refine at `tool` is, as the `p` field has it.  It lives as
+--  long as `lasting`; what finding it out takes is in a region of its own.
+refine_is: (host: blocking.host, lasting: lifetime.memory,
+            parent: lifetime.parent, variables: []io.variable, tool: []u8)
+           -> (identity: []u8) ! report.refused =
+    mut ledger: lifetime.ledger = zeroed
+    memory := region.over(ledger, parent)
+    defer region.release(ledger, parent)
+    answer: []u8 = answered(host, memory, variables, tool) else (problem)
+        _ = problem
+        ""
+    end
+    digest: []u8 = quoted(answer, "\"source_digest\":\"")
+    mode: []u8 = quoted(answer, "\"mode\":\"")
+    dirty: []u8 = bare(answer, "\"dirty\":")
+    library: []u8 = quoted(answer, "\"library\":\"")
+    identity = try glued(host, memory,
+                         ["refine\n", digest, "\n", mode, "\n", dirty, "\n"])
+    if lenof library > 0 then
+        parts: [3][]u8 = ["core", "hosted", "platform"]
+        for part in parts do
+            path: []u8 = try glued(host, memory, [library, "/", part])
+            continue when try kind(host, path) <> io.subdirectory
+            whole: [][]u8 = []
+            sum: sha256.digest = try tree.of_tree(host, parent, path, whole)
+            spelled: sha256.spelling = sha256.hex(sum)
+            identity = try glued(host, memory,
+                                 [identity, spelled[0..<64], "\n"])
+        end for
+    end if
+    if lenof digest == 0 or not strings.same(dirty, "false") then
+        held: file.content = try file.of(host, tool, 0)
+        spelled: sha256.spelling = sha256.hex(held.sum)
+        identity = try glued(host, memory,
+                             [identity, "file\n", spelled[0..<64], "\n"])
+    end if
+    identity = try glued(host, lasting, [identity])
+end refine_is
+
+--  The refine at `tool` did not say what it is.
+silent: atom
+
+--  What `tool version --json` writes to its output, made in `memory`.
+answered: (host: blocking.host, memory: lifetime.memory,
+           variables: []io.variable, tool: []u8) -> (answer: []u8) ! silent =
+    words: [2]text.host_string = [text.host_over("version"),
+                                  text.host_over("--json")]
+    mut child: io.child = io.spawn(host, text.host_over(tool), words[0..<2],
+                                   variables, io.capturing)
+        else (problem)
+        _ = problem
+        fail silent
+    end
+    mut whole := vec.new(item: u8)
+    mut room: [4096]u8 = zeroed
+    mut sound: bool = true
+    loop do
+        got: io.child_read = io.read_child(host, child, room) else (problem)
+            _ = problem
+            sound = false
+            break
+        end
+        break when got.finished
+        continue when got.stream == io.child_errors
+        for byte in room[0..<got.count] do
+            vec.push(whole, memory, byte) else (problem)
+                _ = problem
+                sound = false
+            end
+        end for
+    end loop
+    ended: io.ending = io.wait(host, child) else (problem)
+        _ = problem
+        fail silent
+    end
+    fail silent when not sound
+    match ended.how
+        io.exited(code): fail silent when code <> 0
+        io.signalled: fail silent
+    end match
+    answer = vec.used(whole)
+end answered
+
+--  The bytes of `whole` that follow the first `opening` up to the next
+--  double quote, or nothing when `opening` is not there.
+quoted: (whole: []u8, opening: []u8) -> (value: []u8 from whole) =
+    value = ""
+    rest: []u8 = following(whole, opening)
+    stop: usize = strings.find(rest, u8('"'))
+    return when stop == lenof rest
+    value = rest[0..<stop]
+end quoted
+
+--  The bytes of `whole` that follow the first `opening` up to the next
+--  comma or closing brace.
+bare: (whole: []u8, opening: []u8) -> (value: []u8 from whole) =
+    rest: []u8 = following(whole, opening)
+    mut stop: usize = 0
+    while stop < lenof rest and rest[stop] <> u8(',')
+      and rest[stop] <> u8('}') do
+        inc stop
+    end while
+    value = rest[0..<stop]
+end bare
+
+--  What comes after the first `opening` in `whole`, or nothing.
+following: (whole: []u8, opening: []u8) -> (rest: []u8 from whole) =
+    rest = whole[lenof whole..<lenof whole]
+    mut at: usize = 0
+    while at + lenof opening <= lenof whole do
+        if strings.starts(whole[at..<lenof whole], opening) then
+            rest = whole[at + lenof opening..<lenof whole]
+            return
+        end if
+        inc at
+    end while
+end following

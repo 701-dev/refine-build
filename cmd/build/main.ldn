@@ -1,7 +1,8 @@
 -- refine-build: runs a package's recipe.  It is a contributed command of
 -- `refine`, which runs a `refine-NAME` on PATH as `refine NAME`.
 --
---     refine-build [--refine PATH] [--check] [STEP...]
+--     refine-build [--refine PATH] [--store PATH] [--again] [--check]
+--                  [STEP...]
 --     refine-build explain [CODE]
 --     refine-build --describe
 --     refine-build --complete -- WORD...
@@ -9,7 +10,10 @@
 -- Run in a package's directory, it reads `landin.package` and
 -- `landin.recipe`, says everything that is wrong in them, and runs the
 -- steps asked for, or the recipe's `default` steps, or every step when it
--- names none.  Each runs after the steps it takes inputs from.
+-- names none.  Each runs after the steps it takes inputs from.  What a
+-- step makes is kept in the user's store, or the one `--store` names, and a
+-- step whose program and inputs are what they were is not run but kept;
+-- `--again` runs every step whatever the store keeps.
 --
 -- The last three are what `refine` asks of a command it dispatches
 -- (Landin's D1385, D1387 and D1485): what a code means, what the command is
@@ -23,7 +27,7 @@
 -- not in the help either.  The first prints the SHA-256 of a file, read
 -- `--chunk N` bytes at a time when that is given; the second the content
 -- hash of a directory tree (see `hash/tree`), without the entries of its
--- root that each `--leave NAME` names.  No build uses a hash yet.
+-- root that each `--leave NAME` names.
 
 import core/failure
 import core/io
@@ -48,15 +52,21 @@ import dev701/refine_build/text/strings
 package_file: []u8 = "landin.package"
 recipe_file: []u8 = "landin.recipe"
 
-usage: []u8 = """usage: refine-build [--refine PATH] [--check] [STEP...]
+usage: []u8 = """usage: refine-build [--refine PATH] [--store PATH] [--again] [--check]
+                        [STEP...]
            refine-build explain [CODE]
 
     Run in a package's directory: reads landin.package and landin.recipe
-    and runs the steps named, or the recipe's default steps.
+    and runs the steps named, or the recipe's default steps.  A step
+    whose program and inputs are what they were is kept, not run.
 
       --refine PATH   the refine that `refine` in a run line means;
                       without it, the refine that ran this command,
                       and then the first refine on PATH
+      --store PATH    the store that keeps what steps made; without it,
+                      $XDG_CACHE_HOME/landin/store, or else
+                      $HOME/.cache/landin/store
+      --again         run every step, whatever the store keeps
       --check         read and check the two files, and run nothing
       -h, --help      print this and exit
 
@@ -79,6 +89,8 @@ completing: atom
 options: type = struct
     mode: building | describing | explaining | completing
     refine: []u8
+    store: []u8
+    again: bool
     check_only: bool
     help: bool
     repeat: usize
@@ -164,7 +176,8 @@ build: (host: blocking.host, parent: lifetime.parent, asked: options)
         end
     request: steps.request = (package_file: package_file,
                               recipe_file: recipe_file,
-                              refine: asked.refine)
+                              refine: asked.refine, store: asked.store,
+                              again: asked.again)
     try steps.fits(host, parent, request, plan)
     mut targets := vec.new(item: usize)
     for name in vec.used(asked.wanted) do
@@ -212,7 +225,8 @@ end build
 --  Read the command line.  What it gives lives as long as `memory`.
 arguments: (host: blocking.host, memory: lifetime.memory)
            -> (asked: options) ! report.refused | wrong_usage =
-    asked = (mode: building, refine: "", check_only: false, help: false,
+    asked = (mode: building, refine: "", store: "", again: false,
+             check_only: false, help: false,
              repeat: 1, wanted: vec.new(item: []u8), hash_file: "",
              hash_tree: "", chunk: 0, leave: vec.new(item: []u8))
     count: usize = io.argument_count(host)
@@ -237,6 +251,11 @@ arguments: (host: blocking.host, memory: lifetime.memory)
             asked.help = true
         elsif strings.same(word, "--check") then
             asked.check_only = true
+        elsif strings.same(word, "--again") then
+            asked.again = true
+        elsif strings.same(word, "--store") then
+            asked.store = try value(host, memory, at, count, word, "PATH")
+            inc at
         elsif strings.same(word, "--refine") then
             if at == count then
                 report.say(host, codes.command_line, ["`--refine` takes a path: `--refine PATH`"])
@@ -401,6 +420,7 @@ completed: (host: blocking.host, memory: lifetime.memory, given: [][]u8)
     if lenof words > 1 then
         before: []u8 = words[lenof words - 2]
         return when strings.same(before, "--refine")
+        return when strings.same(before, "--store")
         if strings.same(words[0], "explain") then
             return when lenof words > 2
             for index in usize(0)..<codes.count() do
@@ -410,9 +430,11 @@ completed: (host: blocking.host, memory: lifetime.memory, given: [][]u8)
         end if
     end if
     if strings.starts(typed, "-") then
+        offered(host, typed, "--again")
         offered(host, typed, "--check")
         offered(host, typed, "--help")
         offered(host, typed, "--refine")
+        offered(host, typed, "--store")
         return
     end if
     if lenof words == 1 then offered(host, typed, "explain") end if

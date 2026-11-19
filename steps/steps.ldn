@@ -1,37 +1,89 @@
 -- Running a recipe's steps.
 --
--- Everything the tool writes is under `.landin` in the project:
+-- What a step makes is kept in the store (see `store`), under a key made
+-- from the step's program, its words and its inputs (see `keys.ldn` here).
+-- A step whose key the store knows is not run: its entry is taken as it
+-- is, what the program said then is said again, and the tool says that the
+-- step was kept.  `set always yes` under a step has it run every time, and
+-- `--again` every step.
+--
+-- What the tool writes in the project is under `.landin`:
 --
 --     .landin/packages/OWNER/NAME     a link to the project itself
---     .landin/steps/STEP/out          the step's output, fresh each run
 --     .landin/steps/STEP/view         what the step sees
+--     .landin/out/STEP                a link to the entry the step made
+--     .landin/failed/STEP             a link to what a step that failed
+--                                     wrote, in the store's `tmp`, until
+--                                     the step runs again
 --
 -- A step's program runs in its view, which holds each of its inputs under
--- the input's own name: `packages`, another step's output under that
--- step's name, a project path under that path.  Each is a link.
+-- the input's own name: `packages`, another step's entry under that
+-- step's name, a project path under that path.  Each is a link.  `{out}`
+-- is a new directory in the store's `tmp`; when the program ends with 0
+-- it becomes an entry, and otherwise it is left for a person to look at.
+--
+-- The program's two output streams are read as they come, written on to
+-- the tool's own, and kept with the key, so a kept step says what it said.
+-- Its input is connected to nothing.
+--
+-- Memory: what every step shares, the store's place and the hashes of
+-- what was made, lives as long as the build.  Each step, run or kept, has
+-- a region of its own for its paths, its words, its key file and what its
+-- program said, released when the step is done.
 
 import core/failure
 import core/io
 import core/region
 import core/text
 import core/vec
+import platform/posix
 import hosted/blocking
 import dev701/refine_build/codes
 import dev701/refine_build/lifetime
 import dev701/refine_build/description
 import dev701/refine_build/files
+import dev701/refine_build/hash/file
+import dev701/refine_build/hash/sha256
+import dev701/refine_build/hash/tree
 import dev701/refine_build/recipe
 import dev701/refine_build/report
+import dev701/refine_build/store
 import dev701/refine_build/text/strings
 
 --- What a run is given besides the two files: the names they were read
---- from, for what is said about them, and the `refine` that `refine` in a
---- `run` line means, empty for the one on PATH.
+--- from, for what is said about them; the `refine` that `refine` in a
+--- `run` line means, empty for the one on PATH; the store's directory,
+--- empty for the user's own; and whether every step runs again whatever
+--- the store keeps.
 public request: type = struct
     package_file: []u8
     recipe_file: []u8
     refine: []u8
+    store: []u8
+    again: bool
 end request
+
+--  What a step made, once it is done in this build.
+made_by: type = struct
+    done: bool
+    sum: sha256.digest
+end made_by
+
+--  What the steps of one build share.  The hash of `packages` and what
+--  `refine` is are found when a step first needs them.
+shared: type = struct
+    project: []u8
+    work: []u8
+    changer: []u8
+    variables: []io.variable
+    kept_in: store.store
+    owner: []u8
+    name: []u8
+    packages_known: bool
+    packages_sum: sha256.digest
+    refine_known: bool
+    refine_is: []u8
+end shared
 
 --- Check what only the project's directory can say: that an input which
 --- is no step is a path that exists, and that no step is named as a path
@@ -84,6 +136,8 @@ public run: (host: blocking.host, memory: lifetime.memory,
     try made(host, owned)
     try linked(host, "../../..",
                try glued(host, memory, [owned, "/", about.name]))
+    try made(host, try glued(host, memory, [work, "/out"]))
+    try made(host, try glued(host, memory, [work, "/failed"]))
     changer: []u8 = files.program(host, memory, "env") else (problem)
         _ = problem
         report.say(host, codes.program_missing,
@@ -101,6 +155,21 @@ public run: (host: blocking.host, memory: lifetime.memory,
             fail report.refused
         end
     end for
+    mut results := vec.new(item: made_by)
+    for other in vec.used(plan.steps) do
+        _ = other
+        nothing_yet: made_by = (done: false, sum: zeroed)
+        vec.push(results, memory, nothing_yet) else (problem)
+            gave_up(host, "the recipe", problem)
+            fail report.refused
+        end
+    end for
+    mut common: shared = (project: project, work: work, changer: changer,
+                          variables: vec.used(variables),
+                          kept_in: try store.open(host, memory, asked.store),
+                          owner: about.owner, name: about.name,
+                          packages_known: false, packages_sum: zeroed,
+                          refine_known: false, refine_is: "")
     for index in sequence do
         taken: recipe.step = vec.get(plan.steps, index) else (problem)
             gave_up(host, "the recipe", problem)
@@ -110,43 +179,252 @@ public run: (host: blocking.host, memory: lifetime.memory,
             gave_up(host, "the recipe", problem)
             fail report.refused
         end
-        try run_step(host, parent, asked, plan, project, work, changer,
-                     vec.used(variables), how, taken)
+        mut sum: sha256.digest = zeroed
+        try run_step(host, memory, parent, asked, plan, common,
+                     vec.used(results), how, taken, sum)
+        slot: ptr mut made_by = vec.at(results, index) else (problem)
+            gave_up(host, "the recipe", problem)
+            fail report.refused
+        end
+        slot.val = (done: true, sum: sum)
     end for
 end run
 
---  Run one step.  Everything it allocates is in a region of its own,
---  released when the step has ended, however it ended.
-run_step: (host: blocking.host, parent: lifetime.parent, asked: request,
-           plan: recipe.recipe, project: []u8, work: []u8, changer: []u8,
-           variables: []io.variable, how: recipe.rule, taken: recipe.step)
+--  Run one step, or keep what the store has of it, and put the hash of
+--  its entry in `sum`.  Everything it allocates is in a region of its own,
+--  released when the step is done, however it ended; `lasting` is the
+--  build's, for what the steps share and is found here first.
+run_step: (host: blocking.host, lasting: lifetime.memory,
+           parent: lifetime.parent, asked: request, plan: recipe.recipe,
+           inout common: shared, results: []made_by, how: recipe.rule,
+           taken: recipe.step, inout sum: sha256.digest)
           -> none ! report.refused =
     mut ledger: lifetime.ledger = zeroed
     memory := region.over(ledger, parent)
     defer region.release(ledger, parent)
-    io.write(host, io.out(host), "step ") else none
-    io.write(host, io.out(host), taken.name) else none
-    io.write(host, io.out(host), "\n") else none
-    home: []u8 = try glued(host, memory, [work, "/steps/", taken.name])
-    out: []u8 = try glued(host, memory, [home, "/out"])
+    home: []u8 = try glued(host, memory, [common.work, "/steps/", taken.name])
     view: []u8 = try glued(host, memory, [home, "/view"])
     files.remove_all(host, memory, home) else (problem)
         gave_up(host, home, problem)
         fail report.refused
     end
-    try made(host, out)
     try made(host, view)
     for name in vec.used(taken.direct) do
-        try shown(host, memory, plan, project, work, view, name)
+        try shown(host, memory, plan, common, results, view, name)
     end for
     for name in vec.used(taken.beside) do
-        try shown(host, memory, plan, project, work, view, name)
+        try shown(host, memory, plan, common, results, view, name)
     end for
-    mut words := vec.new(item: []u8)
+    --  The words as the key has them: `{out}` is one zero byte, which no
+    --  word of a program can hold.
+    symbolic: vec.list([]u8) = try worded(host, memory, how, taken, "\x00")
+    first: []u8 = vec.get(symbolic, 0) else (problem)
+        gave_up(host, taken.name, problem)
+        fail report.refused
+    end
+    tool: []u8 = try program(host, memory, asked, taken, view, first)
+    every_time: bool = strings.same(recipe.value_of(how, taken, recipe.always)
+                                    else (problem)
+        _ = problem
+        "no"
+    end, "yes")
+    try learned(host, lasting, parent, common, taken, tool, first)
+    key: sha256.digest = try key_of(host, memory, parent, plan, common,
+                                    results, taken, tool, vec.used(symbolic))
+    result: []u8 = try glued(host, memory, [common.work, "/out/", taken.name])
+    --  What an earlier run left when the step failed is of no use now.
+    remains: []u8 = try glued(host, memory,
+                              [common.work, "/failed/", taken.name])
+    try forgotten(host, memory, common, remains)
+    if not every_time and not asked.again then
+        mut was_kept: bool = true
+        nothing: sha256.digest = zeroed
+        had: sha256.digest = kept(host, memory, common, taken, key, result)
+            else (problem)
+            fail report.refused when problem == report.refused
+            was_kept = false
+            nothing
+        end
+        if was_kept then
+            sum = had
+            return
+        end if
+    end if
+    io.write(host, io.out(host), "step ") else none
+    io.write(host, io.out(host), taken.name) else none
+    io.write(host, io.out(host), "\n") else none
+    out: []u8 = try store.fresh(host, memory, common.kept_in)
+    words: vec.list([]u8) = try worded(host, memory, how, taken, out)
+    mut heard := vec.new(item: store.piece)
+    ended_well: bool = started(host, memory, common, taken, view, tool,
+                               vec.used(words), heard) else (problem)
+        _ = problem
+        files.remove_all(host, memory, out) else none
+        fail report.refused
+    end
+    if not ended_well then
+        try linked(host, out, remains)
+        io.write(host, io.err(host), "note: what the step wrote is kept in `.landin/failed/") else none
+        io.write(host, io.err(host), taken.name) else none
+        io.write(host, io.err(host), "`\n") else none
+        fail report.refused
+    end if
+    sum = try store.admit(host, parent, memory, common.kept_in, out)
+    if not every_time then
+        try store.note(host, memory, common.kept_in, key, sum,
+                       vec.used(heard))
+    end if
+    try linked(host,
+               try store.entry_path(host, memory, common.kept_in, sum),
+               result)
+end run_step
+
+--  The hash of the entry the store keeps for the step with `key`, or
+--  `store.unknown`.  When it keeps one, the step is said to be kept, what
+--  its program said then is said again, and `result` is made a link to
+--  the entry.
+kept: (host: blocking.host, memory: lifetime.memory, common: shared,
+       taken: recipe.step, key: sha256.digest, result: []u8)
+      -> (sum: sha256.digest) ! report.refused | store.unknown =
+    found: store.kept = try store.known(host, memory, common.kept_in, key)
+    io.write(host, io.out(host), "step ") else none
+    io.write(host, io.out(host), taken.name) else none
+    io.write(host, io.out(host), ": kept\n") else none
+    for item in vec.used(found.said) do
+        if item.errors then
+            io.write(host, io.err(host), item.bytes) else none
+        else
+            io.write(host, io.out(host), item.bytes) else none
+        end if
+    end for
+    try linked(host,
+               try store.entry_path(host, memory, common.kept_in,
+                                    found.entry),
+               result)
+    sum = found.entry
+end kept
+
+--  Remove what an earlier run of a step left at `remains` when it failed:
+--  the link, and the directory in the store's `tmp` it points to.
+forgotten: (host: blocking.host, memory: lifetime.memory, common: shared,
+            remains: []u8) -> none ! report.refused =
+    return when try kind(host, remains) <> io.symbolic_link
+    mut room: [4097]u8 = zeroed
+    pointed: text.host_string =
+        posix.read_link_at(posix.working_directory, text.host_over(remains),
+                           room) else (problem)
+            report.say(host, codes.host_refused,
+                       [remains, ": ", posix.words(problem)])
+            fail report.refused
+        end
+    target: []u8 = text.host_bytes(pointed)
+    ours: []u8 = try glued(host, memory, [common.kept_in.root, "/tmp/"])
+    if strings.starts(target, ours) then
+        files.remove_all(host, memory, target) else (problem)
+            gave_up(host, target, problem)
+            fail report.refused
+        end
+    end if
+    io.remove_file(host, text.host_over(remains)) else (problem)
+        gave_up(host, remains, problem)
+        fail report.refused
+    end
+end forgotten
+
+--  Start the step's program, `tool` with the words after the first of
+--  `words`, in the step's view, and wait for it.  What it writes is
+--  written on as it comes and added to `heard`, the copies made in
+--  `memory`.  Whether it ended with code 0; when it did not, that is said.
+started: (host: blocking.host, memory: lifetime.memory, common: shared,
+          taken: recipe.step, view: []u8, tool: []u8, words: [][]u8,
+          inout heard: vec.list(store.piece))
+         -> (ended_well: bool) ! report.refused =
+    ended_well = false
+    mut arguments := vec.new(item: text.host_string)
+    leading: [3][]u8 = ["-C", view, tool]
+    for word in leading do
+        vec.push(arguments, memory, text.host_over(word)) else (problem)
+            gave_up(host, taken.name, problem)
+            fail report.refused
+        end
+    end for
+    for word in words[1..<lenof words] do
+        vec.push(arguments, memory, text.host_over(word)) else (problem)
+            gave_up(host, taken.name, problem)
+            fail report.refused
+        end
+    end for
+    mut child: io.child = io.spawn(host, text.host_over(common.changer),
+                                   vec.used(arguments), common.variables,
+                                   io.capturing) else (problem)
+        report.say(host, codes.program_unstarted,
+                   ["step `", taken.name, "`: could not start `", words[0],
+                    "`: ", failure.words(problem)])
+        fail report.refused
+    end
+    mut room: [16384]u8 = zeroed
+    loop do
+        got: io.child_read = io.read_child(host, child, room) else (problem)
+            _ = problem
+            break
+        end
+        break when got.finished
+        continue when got.count == 0
+        errors: bool = got.stream == io.child_errors
+        if errors then
+            io.write(host, io.err(host), room[0..<got.count]) else none
+        else
+            io.write(host, io.out(host), room[0..<got.count]) else none
+        end if
+        copy: []u8 = strings.keep(memory, room[0..<got.count]) else (problem)
+            _ = io.wait(host, child) else none
+            gave_up(host, taken.name, problem)
+            fail report.refused
+        end
+        item: store.piece = (errors: errors, bytes: copy)
+        vec.push(heard, memory, item) else (problem)
+            _ = io.wait(host, child) else none
+            gave_up(host, taken.name, problem)
+            fail report.refused
+        end
+    end loop
+    ended: io.ending = io.wait(host, child) else (problem)
+        report.say(host, codes.program_unstarted,
+                   ["step `", taken.name, "`: lost `", words[0], "`: ",
+                    failure.words(problem)])
+        fail report.refused
+    end
+    match ended.how
+        io.exited(code): begin
+            if code == 0 then
+                ended_well = true
+                return
+            end if
+            mut digits_room: [16]u8 = zeroed
+            mut digits := text.over(digits_room)
+            text.append_i32(digits, code) else none
+            report.say(host, codes.step_failed,
+                       ["step `", taken.name, "` failed: `", words[0],
+                        "` ended with code ", text.used(digits)])
+        end
+        io.signalled:
+            report.say(host, codes.step_failed,
+                       ["step `", taken.name, "` failed: `", words[0],
+                        "` was ended by a signal"])
+    end match
+end started
+
+--  The words of the step's program, its placeholders filled in and
+--  `{out}` given as `out`.  They live as long as `memory`.
+worded: (host: blocking.host, memory: lifetime.memory, how: recipe.rule,
+         taken: recipe.step, out: []u8)
+        -> (words: vec.list([]u8)) ! report.refused =
+    words = vec.new(item: []u8)
     for word in vec.used(how.run) do
         if strings.same(word, "{in}") then
             for name in vec.used(taken.direct) do
-                vec.push(words, memory, name) else (problem)
+                copy: []u8 = try glued(host, memory, [name])
+                vec.push(words, memory, copy) else (problem)
                     gave_up(host, taken.name, problem)
                     fail report.refused
                 end
@@ -159,64 +437,19 @@ run_step: (host: blocking.host, parent: lifetime.parent, asked: request,
             end
         end if
     end for
-    named: [][]u8 = vec.used(words)
-    tool: []u8 = try program(host, memory, asked, taken, view, named[0])
-    mut arguments := vec.new(item: text.host_string)
-    leading: [3][]u8 = ["-C", view, tool]
-    for word in leading do
-        vec.push(arguments, memory, text.host_over(word)) else (problem)
-            gave_up(host, taken.name, problem)
-            fail report.refused
-        end
-    end for
-    for word in named[1..<lenof named] do
-        vec.push(arguments, memory, text.host_over(word)) else (problem)
-            gave_up(host, taken.name, problem)
-            fail report.refused
-        end
-    end for
-    started: io.child = io.spawn(host, text.host_over(changer),
-                                 vec.used(arguments), variables,
-                                 io.inheriting) else (problem)
-        report.say(host, codes.program_unstarted,
-                   ["step `", taken.name, "`: could not start `", named[0],
-                    "`: ", failure.words(problem)])
-        fail report.refused
-    end
-    ended: io.ending = io.wait(host, started) else (problem)
-        report.say(host, codes.program_unstarted,
-                   ["step `", taken.name, "`: lost `", named[0], "`: ",
-                    failure.words(problem)])
-        fail report.refused
-    end
-    match ended.how
-        io.exited(code): begin
-            return when code == 0
-            mut room: [16]u8 = zeroed
-            mut digits := text.over(room)
-            text.append_i32(digits, code) else none
-            report.say(host, codes.step_failed,
-                       ["step `", taken.name, "` failed: `", named[0],
-                        "` ended with code ", text.used(digits)])
-        end
-        io.signalled:
-            report.say(host, codes.step_failed,
-                       ["step `", taken.name, "` failed: `", named[0],
-                        "` was ended by a signal"])
-    end match
-    fail report.refused
-end run_step
+end worded
 
 --  Make the input `name` visible in `view` under its own name.
 shown: (host: blocking.host, memory: lifetime.memory, plan: recipe.recipe,
-        project: []u8, work: []u8, view: []u8, name: []u8)
+        common: shared, results: []made_by, view: []u8, name: []u8)
        -> none ! report.refused =
     place: []u8 = try glued(host, memory, [view, "/", name])
     if strings.same(name, recipe.packages) then
-        try linked(host, try glued(host, memory, [work, "/packages"]), place)
+        try linked(host, try glued(host, memory, [common.work, "/packages"]),
+                   place)
         return
     end if
-    _ = recipe.step_named(plan, name) else (problem)
+    index: usize = recipe.step_named(plan, name) else (problem)
         _ = problem
         mut cut: usize = lenof name
         while cut > 0 and name[cut - 1] <> u8('/') do dec cut end while
@@ -224,10 +457,13 @@ shown: (host: blocking.host, memory: lifetime.memory, plan: recipe.recipe,
             try made(host,
                      try glued(host, memory, [view, "/", name[0..<cut - 1]]))
         end if
-        try linked(host, try glued(host, memory, [project, "/", name]), place)
+        try linked(host, try glued(host, memory, [common.project, "/", name]),
+                   place)
         return
     end
-    try linked(host, try glued(host, memory, [work, "/steps/", name, "/out"]),
+    try linked(host,
+               try store.entry_path(host, memory, common.kept_in,
+                                    results[index].sum),
                place)
 end shown
 

@@ -5,9 +5,14 @@
 -- that region is released:
 --
 --     the process   the command line as it was read
---     one build     the two files as read and checked, and the order of
---                   the steps
---     one step      the paths, the view and the words of one step's program
+--     one build     the two files as read and checked, the order of the
+--                   steps, where the store is, what each step made, and
+--                   what every step's key needs: the hash of `packages`
+--                   and what `refine` is
+--     one step      the paths, the view and the words of one step's
+--                   program, its key, and what the program wrote: as it
+--                   was read when the step ran, or as the store kept it
+--                   when the step is kept
 --
 -- `main` takes the heap once.  A routine that allocates is given the
 -- region it allocates from as `memory`, and what it returns lives as long

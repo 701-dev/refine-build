@@ -1,3 +1,4 @@
 step broken
 error[RB0403]: step `broken` failed: `false` ended with code 1
+note: what the step wrote is kept in `.landin/failed/broken`
 [exit 1]

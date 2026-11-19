@@ -1,3 +1,2 @@
-step one
 error[RB0401]: step `one`: no program `no-such-program-anywhere` on PATH
 [exit 1]
