@@ -3,7 +3,7 @@
 
 import core/cmp
 import core/mem
-import janhaan/refine_build/lifetime
+import dev701/refine_build/lifetime
 
 --- A copy of `bytes` that lives as long as `memory`.
 public keep: (memory: lifetime.memory, bytes: []u8) -> (copy: []u8)

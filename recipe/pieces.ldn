@@ -2,7 +2,7 @@
 -- what a placeholder stands for in a step.
 
 import core/vec
-import janhaan/refine_build/text/strings
+import dev701/refine_build/text/strings
 
 --- A piece of a `run` word is plain bytes.
 public plain: atom

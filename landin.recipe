@@ -7,10 +7,10 @@
 -- each under its owner/name path, ready to be a `--root`.
 
 rule compile
-    run  refine compile --root packages packages/janhaan/refine_build/{entry} -o {out}/{name}
+    run  refine compile --root packages packages/dev701/refine_build/{entry} -o {out}/{name}
 
 rule check
-    run  refine check --root packages packages/janhaan/refine_build/{entry}
+    run  refine check --root packages packages/dev701/refine_build/{entry}
 
 step tool  compile  with packages
     set  entry  cmd/build

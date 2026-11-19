@@ -1,4 +1,4 @@
-package janhaan
+package dev701
 package Jan/Tool
 kind tool
 kind program
@@ -8,9 +8,9 @@ program a/b cmd/build
 program x Cmd/build
 program x cmd/build
 program x cmd/other
-needs janhaan/utf8 2.3
-needs janhaan/utf8 2.3.1
-uses  janhaan/utf8 1.0.0
+needs dev701/utf8 2.3
+needs dev701/utf8 2.3.1
+uses  dev701/utf8 1.0.0
 needs landin/x 1.0.0
 --comment without a space
 word "open

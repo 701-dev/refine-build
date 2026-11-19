@@ -1,4 +1,4 @@
-landin.package:1: `janhaan` is no package name; write `owner/name`, each half lowercase letters, digits and `_`, since both become directories in an import path
+landin.package:1: `dev701` is no package name; write `owner/name`, each half lowercase letters, digits and `_`, since both become directories in an import path
 landin.package:2: `Jan/Tool` is no package name; write `owner/name`, each half lowercase letters, digits and `_`, since both become directories in an import path
 landin.package:3: a package's kind is `library` or `program`
 landin.package:5: a second `kind` line; a description has one, so remove one of them
@@ -7,7 +7,7 @@ landin.package:7: a program's name is one word with no `/` in it
 landin.package:8: a program's module is a path inside the package, such as `cmd/build`: lowercase letters, digits and `_` between `/`
 landin.package:10: the program `x` is named twice; remove one of the lines
 landin.package:11: a version is three numbers, `MAJOR.MINOR.PATCH`, such as `2.3.1`
-landin.package:13: `janhaan/utf8` is listed twice; a package is needed or used once, at one version
+landin.package:13: `dev701/utf8` is listed twice; a package is needed or used once, at one version
 landin.package:14: `landin` is the library's own namespace and cannot own a package; choose another owner
 landin.package:15: unknown keyword `--comment`; a description line starts with package, kind, licence, program, needs or uses, and a comment with `--` and a space
 landin.package:16: a quoted word has no closing quote

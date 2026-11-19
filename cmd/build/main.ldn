@@ -18,13 +18,13 @@ import core/text
 import core/vec
 import hosted/blocking
 import hosted/heap
-import janhaan/refine_build/description
-import janhaan/refine_build/files
-import janhaan/refine_build/lifetime
-import janhaan/refine_build/recipe
-import janhaan/refine_build/report
-import janhaan/refine_build/steps
-import janhaan/refine_build/text/strings
+import dev701/refine_build/description
+import dev701/refine_build/files
+import dev701/refine_build/lifetime
+import dev701/refine_build/recipe
+import dev701/refine_build/report
+import dev701/refine_build/steps
+import dev701/refine_build/text/strings
 
 package_file: []u8 = "landin.package"
 recipe_file: []u8 = "landin.recipe"

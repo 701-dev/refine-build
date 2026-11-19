@@ -5,10 +5,10 @@
 import core/mem
 import core/vec
 import hosted/blocking
-import janhaan/refine_build/lifetime
-import janhaan/refine_build/report
-import janhaan/refine_build/text/lines
-import janhaan/refine_build/text/strings
+import dev701/refine_build/lifetime
+import dev701/refine_build/report
+import dev701/refine_build/text/lines
+import dev701/refine_build/text/strings
 
 check: (host: blocking.host, memory: lifetime.memory, file: []u8,
         inout into: recipe, default_lines: []lines.line)

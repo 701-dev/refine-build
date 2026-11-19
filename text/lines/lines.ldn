@@ -9,8 +9,8 @@
 import core/mem
 import core/text
 import core/vec
-import janhaan/refine_build/lifetime
-import janhaan/refine_build/text/strings
+import dev701/refine_build/lifetime
+import dev701/refine_build/text/strings
 
 --- Nothing is wrong with the line.
 public sound: atom

@@ -38,7 +38,7 @@ failed, and with 2 for a command line it does not understand.
 Data only; nothing in it is executed.
 
 ```
-package  janhaan/refine_build       -- owner/name; both become directories
+package  dev701/refine_build       -- owner/name; both become directories
 kind     program                    -- or library
 licence  MIT
 program  refine-build  cmd/build    -- an executable and the module it starts in
@@ -53,7 +53,7 @@ refused, since nothing fetches a package yet.
 
 ```
 rule compile
-    run  refine compile --root packages packages/janhaan/refine_build/{entry} -o {out}/{name}
+    run  refine compile --root packages packages/dev701/refine_build/{entry} -o {out}/{name}
 
 step tool  compile  with packages
     set  entry  cmd/build
@@ -97,9 +97,9 @@ Everything the tool writes is under `.landin/`.
 | `tests/` | Small projects and the script that runs the tool over them. |
 | `bootstrap.sh` | Builds the tool by hand. |
 
-Modules import each other by their full name, `janhaan/refine_build/text/lines`,
-so the checkout has to appear at `janhaan/refine_build` under a root. The link
-`.landin/packages/janhaan/refine_build` does that.
+Modules import each other by their full name, `dev701/refine_build/text/lines`,
+so the checkout has to appear at `dev701/refine_build` under a root. The link
+`.landin/packages/dev701/refine_build` does that.
 
 ## Testing it
 
@@ -130,7 +130,6 @@ process, as a watch mode will, without the memory in use growing.
 - Each step is started through `env -C`, which needs GNU coreutils. The
   Landin library cannot yet start a program in another directory.
 - Steps run one at a time, and all of them on every run.
-- The owner `janhaan` in the package's name is a placeholder.
 - It is built and tested with a development build of `refine` from Landin's
   main branch. No released `refine` has been tried.
 

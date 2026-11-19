@@ -1,7 +1,7 @@
 -- What this package is.  Data only: nothing here is ever executed.
 -- Its version is the tag it is released under, not a line in this file.
 
-package  janhaan/refine_build
+package  dev701/refine_build
 kind     program
 licence  MIT OR Apache-2.0
 

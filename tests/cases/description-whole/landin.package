@@ -1,8 +1,8 @@
 -- every keyword once, as a description may use them
-package  janhaan/demo
+package  dev701/demo
 kind     program
 licence  MIT OR Apache-2.0
 program  demo       cmd/demo
 program  demo-test  cmd/demo_test
-needs    janhaan/utf8    2.3.1
-uses     janhaan/svdgen  0.4.0   -- a tool for the recipe
+needs    dev701/utf8    2.3.1
+uses     dev701/svdgen  0.4.0   -- a tool for the recipe

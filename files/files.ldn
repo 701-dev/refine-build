@@ -7,8 +7,8 @@ import core/mem
 import core/text
 import core/vec
 import hosted/blocking
-import janhaan/refine_build/lifetime
-import janhaan/refine_build/text/strings
+import dev701/refine_build/lifetime
+import dev701/refine_build/text/strings
 import platform/posix
 
 --- The whole content of the file at `path`, living as long as `memory`.
