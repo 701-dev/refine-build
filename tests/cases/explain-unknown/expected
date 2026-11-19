@@ -1,0 +1,2 @@
+error[RB0001]: `explain RB9999`: refine-build has no such code; `refine-build explain` lists its codes
+[exit 2]

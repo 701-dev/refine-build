@@ -1,0 +1,8 @@
+RB0302
+A `{name}` in a `run` line and the `set` lines do not agree.
+`{out}` is the step's output directory and `{in}` its `from`
+inputs; `{in}` stands for several words and is a word of its
+own. Any other `{name}` needs a `set name VALUE` under the step
+or the rule, a `set` that no `run` line uses is refused, and a
+brace itself is written `{{` or `}}`.
+[exit 0]

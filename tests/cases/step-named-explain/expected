@@ -1,0 +1,2 @@
+error[RB0103]: landin.recipe:4: a step cannot be named `explain`, since `refine-build explain CODE` explains a code; give the step another name
+[exit 1]

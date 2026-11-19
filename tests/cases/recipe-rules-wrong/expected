@@ -1,8 +1,8 @@
-landin.recipe:1: rule `norun` has no `run` line; say what it runs with `run PROGRAM WORDS...`
-landin.recipe:3: a brace in `{open` opens or closes nothing; write `{name}` for a value and `{{` or `}}` for a brace itself
-landin.recipe:3: a brace in `and}close` opens or closes nothing; write `{name}` for a value and `{{` or `}}` for a brace itself
-landin.recipe:3: a brace in `{}` opens or closes nothing; write `{name}` for a value and `{{` or `}}` for a brace itself
-landin.recipe:3: a brace in `{a{b}}` opens or closes nothing; write `{name}` for a value and `{{` or `}}` for a brace itself
-landin.recipe:5: `{in}` is part of `x{in}`; it stands for several words, one for each `from` input, so write it as a word of its own
-landin.recipe:7: nothing in rule `copy` uses `{unused}`; use it in the `run` line or remove the `set`
+error[RB0301]: landin.recipe:1: rule `norun` has no `run` line; say what it runs with `run PROGRAM WORDS...`
+error[RB0302]: landin.recipe:3: a brace in `{open` opens or closes nothing; write `{name}` for a value and `{{` or `}}` for a brace itself
+error[RB0302]: landin.recipe:3: a brace in `and}close` opens or closes nothing; write `{name}` for a value and `{{` or `}}` for a brace itself
+error[RB0302]: landin.recipe:3: a brace in `{}` opens or closes nothing; write `{name}` for a value and `{{` or `}}` for a brace itself
+error[RB0302]: landin.recipe:3: a brace in `{a{b}}` opens or closes nothing; write `{name}` for a value and `{{` or `}}` for a brace itself
+error[RB0302]: landin.recipe:5: `{in}` is part of `x{in}`; it stands for several words, one for each `from` input, so write it as a word of its own
+error[RB0302]: landin.recipe:7: nothing in rule `copy` uses `{unused}`; use it in the `run` line or remove the `set`
 [exit 1]

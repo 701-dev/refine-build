@@ -1,4 +1,4 @@
-landin.recipe:3: step `data` has the name of a path in the project, so an input `data` could mean either; give the step another name
-landin.recipe:4: the input `data/missing.txt` of step `two` is neither a step nor a path in the project; an input is `packages`, a step's name, or a file or directory that exists
-landin.recipe:4: the input `nothing` of step `two` is neither a step nor a path in the project; an input is `packages`, a step's name, or a file or directory that exists
+error[RB0306]: landin.recipe:3: step `data` has the name of a path in the project, so an input `data` could mean either; give the step another name
+error[RB0305]: landin.recipe:4: the input `data/missing.txt` of step `two` is neither a step nor a path in the project; an input is `packages`, a step's name, or a file or directory that exists
+error[RB0305]: landin.recipe:4: the input `nothing` of step `two` is neither a step nor a path in the project; an input is `packages`, a step's name, or a file or directory that exists
 [exit 1]

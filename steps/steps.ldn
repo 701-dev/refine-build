@@ -16,6 +16,7 @@ import core/region
 import core/text
 import core/vec
 import hosted/blocking
+import dev701/refine_build/codes
 import dev701/refine_build/lifetime
 import dev701/refine_build/description
 import dev701/refine_build/files
@@ -47,7 +48,7 @@ public fits: (host: blocking.host, parent: lifetime.parent, asked: request,
     for taken in vec.used(plan.steps) do
         at_name: []u8 = try glued(host, memory, [project, "/", taken.name])
         if try kind(host, at_name) <> files.absent then
-            report.at_line(host, asked.recipe_file, taken.number,
+            report.at_line(host, codes.step_shadows_path, asked.recipe_file, taken.number,
                            ["step `", taken.name,
                             "` has the name of a path in the project, so an input `",
                             taken.name,
@@ -85,7 +86,7 @@ public run: (host: blocking.host, memory: lifetime.memory,
                try glued(host, memory, [owned, "/", about.name]))
     changer: []u8 = files.program(host, memory, "env") else (problem)
         _ = problem
-        report.say(host,
+        report.say(host, codes.program_missing,
                    ["no `env` on PATH; refine-build starts each step through `env -C DIRECTORY`, so that it runs in its view"])
         fail report.refused
     end
@@ -177,13 +178,13 @@ run_step: (host: blocking.host, parent: lifetime.parent, asked: request,
     started: io.child = io.spawn(host, text.host_over(changer),
                                  vec.used(arguments), variables,
                                  io.inheriting) else (problem)
-        report.say(host,
+        report.say(host, codes.program_unstarted,
                    ["step `", taken.name, "`: could not start `", named[0],
                     "`: ", failure.words(problem)])
         fail report.refused
     end
     ended: io.ending = io.wait(host, started) else (problem)
-        report.say(host,
+        report.say(host, codes.program_unstarted,
                    ["step `", taken.name, "`: lost `", named[0], "`: ",
                     failure.words(problem)])
         fail report.refused
@@ -194,12 +195,12 @@ run_step: (host: blocking.host, parent: lifetime.parent, asked: request,
             mut room: [16]u8 = zeroed
             mut digits := text.over(room)
             text.append_i32(digits, code) else none
-            report.say(host,
+            report.say(host, codes.step_failed,
                        ["step `", taken.name, "` failed: `", named[0],
                         "` ended with code ", text.used(digits)])
         end
         io.signalled:
-            report.say(host,
+            report.say(host, codes.step_failed,
                        ["step `", taken.name, "` failed: `", named[0],
                         "` was ended by a signal"])
     end match
@@ -271,7 +272,7 @@ program: (host: blocking.host, memory: lifetime.memory, asked: request,
             path = try glued(host, memory, [view, "/", word])
         end if
         if try kind(host, path) == files.absent then
-            report.say(host,
+            report.say(host, codes.program_missing,
                        ["step `", taken.name, "`: no program at `", word,
                         "` in the step's view; a program given by a path is an input of the step, or inside one"])
             fail report.refused
@@ -281,11 +282,11 @@ program: (host: blocking.host, memory: lifetime.memory, asked: request,
     path = files.program(host, memory, word) else (problem)
         _ = problem
         if strings.same(word, "refine") then
-            report.say(host,
+            report.say(host, codes.no_refine,
                        ["step `", taken.name,
                         "`: no `refine` on PATH; say which one with `--refine PATH`"])
         else
-            report.say(host,
+            report.say(host, codes.program_missing,
                        ["step `", taken.name, "`: no program `", word,
                         "` on PATH"])
         end if
@@ -304,7 +305,7 @@ present: (host: blocking.host, memory: lifetime.memory, asked: request,
         _ = problem
         at_name: []u8 = try glued(host, memory, [project, "/", name])
         if try kind(host, at_name) == files.absent then
-            report.at_line(host, asked.recipe_file, taken.number,
+            report.at_line(host, codes.input_unknown, asked.recipe_file, taken.number,
                            ["the input `", name, "` of step `", taken.name,
                             "` is neither a step nor a path in the project; an input is `packages`, a step's name, or a file or directory that exists"])
             yes = false
@@ -316,7 +317,7 @@ end present
 --  Say that `what` could not be dealt with and why.
 gave_up: (host: blocking.host, what: []u8, problem: failure.reason)
          -> none =
-    report.say(host, [what, ": ", failure.words(problem)])
+    report.say(host, codes.host_refused, [what, ": ", failure.words(problem)])
 end gave_up
 
 here: (host: blocking.host, memory: lifetime.memory) -> (path: []u8)

@@ -1,0 +1,8 @@
+rule say
+    run  echo done
+
+step first   say
+step second  say  with first
+step third   say
+
+default second

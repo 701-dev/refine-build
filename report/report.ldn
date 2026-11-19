@@ -1,23 +1,29 @@
 -- What the tool says to a person, on standard error.
+--
+-- Every refusal carries a code, `error[RB0102]: ...`, in the form Landin's
+-- own diagnostics have, and `refine-build explain RB0102` says more about
+-- it.  The codes and their explanations are in `codes`.
 
 import core/io
 import core/text
 import hosted/blocking
+import dev701/refine_build/codes
 
 --- Something was wrong and has been said; the caller only has to stop.
 public refused: atom
 
---- Say `parts`, one after another, as one line.
-public say: (host: blocking.host, parts: [][]u8) -> none =
-    io.write(host, io.err(host), "refine-build: ") else none
+--- Say `parts`, one after another, as one line under the code `which`.
+public say: (host: blocking.host, which: codes.code, parts: [][]u8) -> none =
+    opened(host, which)
     for part in parts do io.write(host, io.err(host), part) else none end for
     io.write(host, io.err(host), "\n") else none
 end say
 
 --- Say what is wrong at a line of a file, `file:12: ...`, or with the
 --- file as a whole when `number` is 0.
-public at_line: (host: blocking.host, file: []u8, number: usize,
-                 parts: [][]u8) -> none =
+public at_line: (host: blocking.host, which: codes.code, file: []u8,
+                 number: usize, parts: [][]u8) -> none =
+    opened(host, which)
     io.write(host, io.err(host), file) else none
     if number > 0 then
         mut room: [24]u8 = zeroed
@@ -30,3 +36,10 @@ public at_line: (host: blocking.host, file: []u8, number: usize,
     for part in parts do io.write(host, io.err(host), part) else none end for
     io.write(host, io.err(host), "\n") else none
 end at_line
+
+--  `error[RB0102]: `, which starts every refusal.
+opened: (host: blocking.host, which: codes.code) -> none =
+    io.write(host, io.err(host), "error[") else none
+    io.write(host, io.err(host), codes.spelled(which)) else none
+    io.write(host, io.err(host), "]: ") else none
+end opened

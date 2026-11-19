@@ -2,7 +2,8 @@
 
 A build tool for [Landin](https://github.com/JanHaan/Landin) packages,
 written in Landin. It reads a package's description and its recipe and runs
-the recipe's steps. `refine build` is meant to run it.
+the recipe's steps. It is a contributed command of `refine`: on PATH as
+`refine-NAME`, it runs as `refine NAME`.
 
 **Status: a prototype.** It reads and checks both files and runs steps one
 after another. It fetches nothing and keeps no store: every run runs every
@@ -28,10 +29,35 @@ refine-build                 # the recipe's default steps
 refine-build tool            # one step, after the steps it needs
 refine-build --check         # read and check both files, run nothing
 refine-build --refine PATH   # which refine a `run refine ...` line means
+refine-build explain RB0102  # what a code means; `explain` alone lists them
 ```
 
 It ends with 0 when every step did, with 1 when a file is wrong or a step
 failed, and with 2 for a command line it does not understand.
+
+A refusal starts with its code, `error[RB0102]: landin.recipe:4: ...`, as
+Landin's own do, and `explain` says more about each.
+
+## Under `refine`
+
+`refine` runs a `refine-NAME` it finds on PATH as `refine NAME`, after
+asking it to describe itself. The tool answers what that takes:
+
+| Asked | Answer |
+|---|---|
+| `--describe` | One JSON object in Landin's `landin-command-1`: the name `build`, the line `refine help` shows, and the code prefix `RB`. |
+| `--help` | Its help, which `refine help NAME` shows. |
+| `explain CODE` | What the code means. `refine explain RB0102` is forwarded here, since the tool claims `RB`. |
+| `--complete -- WORD...` | How the last word could end, one a line: an option, a code after `explain`, or a step of the recipe in the directory. |
+
+`refine` names itself to a command it runs in `LANDIN_REFINE`, and that is
+the refine a `run refine ...` line means. `--refine PATH` overrides it, and
+run by its own name the tool takes the first `refine` on PATH.
+
+**`refine build` does not work yet.** `refine` reserves the word `build`
+and dispatches nothing under it: it answers "build is reserved for future
+project orchestration". Until that changes, run the tool by its own name.
+The tests reach it through the dispatcher under another name, `bld`.
 
 ## The description: `landin.package`
 
@@ -88,6 +114,7 @@ Everything the tool writes is under `.landin/`.
 | `cmd/build/` | The `refine-build` program: the command line, and the order of work. |
 | `text/lines/` | The reader for keyword-first line files. |
 | `text/strings/` | Byte strings: copies and comparisons. |
+| `codes/` | The codes of the tool's refusals and what each means, in one place. |
 | `lifetime/` | How long memory lives: the regions of the process, one build and one step. |
 | `description/` | Reading and checking `landin.package`. |
 | `recipe/` | Reading and checking `landin.recipe`, placeholders, the steps' order. |
@@ -109,7 +136,12 @@ tests/run.sh .landin/bootstrap/refine-build path/to/refine
 
 Each case under `tests/cases` is a project; the script compares what the
 tool says and how it ends with the case's `expected`. With a refine given,
-the last check has the tool build itself and compares the two executables.
+a further check has the tool build itself and compares the two executables.
+
+It then asks the tool to explain every code it lists, and holds that list
+to `codes/codes.ldn` and to the codes the cases expect. With a refine, it
+also puts the tool on PATH and runs it through `refine`: a build of this
+package, `refine help`, a forwarded `refine explain` and a completion.
 
 The script also checks memory. It repeats a whole build in one process
 with `--repeat N`, an option for this test only, a few times and many

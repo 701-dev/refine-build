@@ -5,6 +5,7 @@
 import core/mem
 import core/vec
 import hosted/blocking
+import dev701/refine_build/codes
 import dev701/refine_build/lifetime
 import dev701/refine_build/report
 import dev701/refine_build/text/lines
@@ -16,7 +17,7 @@ check: (host: blocking.host, memory: lifetime.memory, file: []u8,
     mut wrong: bool = false
     for how in vec.used(into.rules) do
         if how.run_number == 0 then
-            report.at_line(host, file, how.number,
+            report.at_line(host, codes.rule_runs_nothing, file, how.number,
                            ["rule `", how.name,
                             "` has no `run` line; say what it runs with `run PROGRAM WORDS...`"])
             wrong = true
@@ -28,7 +29,7 @@ check: (host: blocking.host, memory: lifetime.memory, file: []u8,
                 found: piece = piece_at(word, at)
                 break when found.kind == ended
                 if found.kind == broken then
-                    report.at_line(host, file, how.run_number,
+                    report.at_line(host, codes.placeholder, file, how.run_number,
                                    ["a brace in `", word,
                                     "` opens or closes nothing; write `{name}` for a value and `{{` or `}}` for a brace itself"])
                     wrong = true
@@ -37,7 +38,7 @@ check: (host: blocking.host, memory: lifetime.memory, file: []u8,
                 if found.kind == named
                   and strings.same(word[found.start..<found.stop], "in")
                   and lenof word <> 4 then
-                    report.at_line(host, file, how.run_number,
+                    report.at_line(host, codes.placeholder, file, how.run_number,
                                    ["`{in}` is part of `", word,
                                     "`; it stands for several words, one for each `from` input, so write it as a word of its own"])
                     wrong = true
@@ -47,7 +48,7 @@ check: (host: blocking.host, memory: lifetime.memory, file: []u8,
         end for
         for item in vec.used(how.sets) do
             if not uses(how, item.name) then
-                report.at_line(host, file, item.number,
+                report.at_line(host, codes.placeholder, file, item.number,
                                ["nothing in rule `", how.name, "` uses `{",
                                 item.name,
                                 "}`; use it in the `run` line or remove the `set`"])
@@ -68,7 +69,7 @@ check: (host: blocking.host, memory: lifetime.memory, file: []u8,
         for name in words[1..<lenof words] do
             index: usize = step_named(into, name) else (problem)
                 _ = problem
-                report.at_line(host, file, item.number,
+                report.at_line(host, codes.name_unknown, file, item.number,
                                ["no step `", name,
                                 "` for `default` to name; it names steps of this recipe"])
                 wrong = true
@@ -88,7 +89,7 @@ check: (host: blocking.host, memory: lifetime.memory, file: []u8,
         marks: []mut bool = vec.used(seen)
         for at in usize(0)..<lenof marks do marks[at] = false end for
         if reaches(into, index, index, seen) then
-            report.at_line(host, file, taken.number,
+            report.at_line(host, codes.steps_circle, file, taken.number,
                            ["step `", taken.name,
                             "` needs its own output, directly or through the steps it takes inputs from; a step runs after every step it names, so one of them must stop naming the other"])
             wrong = true
@@ -117,7 +118,7 @@ check_step: (host: blocking.host, file: []u8, inout into: recipe,
         end if
     end for
     if not found then
-        report.at_line(host, file, taken.number,
+        report.at_line(host, codes.name_unknown, file, taken.number,
                        ["step `", taken.name, "` names the rule `",
                         taken.rule_name,
                         "`, and the recipe has none of that name; write `rule ",
@@ -131,7 +132,7 @@ check_step: (host: blocking.host, file: []u8, inout into: recipe,
     mut wrong: bool = false
     for item in vec.used(taken.sets) do
         if not uses(how, item.name) then
-            report.at_line(host, file, item.number,
+            report.at_line(host, codes.placeholder, file, item.number,
                            ["nothing in rule `", how.name, "` uses `{",
                             item.name,
                             "}`; check the name against the rule's `run` line or remove the `set`"])
@@ -149,7 +150,7 @@ check_step: (host: blocking.host, file: []u8, inout into: recipe,
             continue when strings.same(name, "in") or strings.same(name, "out")
             _ = value_of(how, taken, name) else (problem)
                 _ = problem
-                report.at_line(host, file, taken.number,
+                report.at_line(host, codes.placeholder, file, taken.number,
                                ["rule `", how.name, "` uses `{", name,
                                 "}`, and step `", taken.name,
                                 "` gives it no value; write `set ", name,
@@ -174,7 +175,7 @@ input_fits: (host: blocking.host, file: []u8, taken: step, name: []u8)
             -> (yes: bool) =
     yes = inside(name)
     if not yes then
-        report.at_line(host, file, taken.number,
+        report.at_line(host, codes.input_unknown, file, taken.number,
                        ["the input `", name, "` of step `", taken.name,
                         "` is no path inside the project; an input is `packages`, a step's name, or a path with no `..`, not starting with `/`"])
     end if

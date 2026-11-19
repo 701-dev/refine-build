@@ -1,5 +1,5 @@
-landin.recipe:3: step `a` needs its own output, directly or through the steps it takes inputs from; a step runs after every step it names, so one of them must stop naming the other
-landin.recipe:4: step `b` needs its own output, directly or through the steps it takes inputs from; a step runs after every step it names, so one of them must stop naming the other
-landin.recipe:5: step `c` needs its own output, directly or through the steps it takes inputs from; a step runs after every step it names, so one of them must stop naming the other
-landin.recipe:6: step `d` needs its own output, directly or through the steps it takes inputs from; a step runs after every step it names, so one of them must stop naming the other
+error[RB0304]: landin.recipe:3: step `a` needs its own output, directly or through the steps it takes inputs from; a step runs after every step it names, so one of them must stop naming the other
+error[RB0304]: landin.recipe:4: step `b` needs its own output, directly or through the steps it takes inputs from; a step runs after every step it names, so one of them must stop naming the other
+error[RB0304]: landin.recipe:5: step `c` needs its own output, directly or through the steps it takes inputs from; a step runs after every step it names, so one of them must stop naming the other
+error[RB0304]: landin.recipe:6: step `d` needs its own output, directly or through the steps it takes inputs from; a step runs after every step it names, so one of them must stop naming the other
 [exit 1]

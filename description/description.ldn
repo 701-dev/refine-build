@@ -11,6 +11,7 @@
 import core/mem
 import core/vec
 import hosted/blocking
+import dev701/refine_build/codes
 import dev701/refine_build/lifetime
 import dev701/refine_build/report
 import dev701/refine_build/text/lines
@@ -70,13 +71,13 @@ public read: (host: blocking.host, memory: lifetime.memory, file: []u8,
         end if
     end for
     if not named then
-        report.at_line(host, file, 0,
+        report.at_line(host, codes.line_missing, file, 0,
                        ["no `package` line; name the package with `package owner/name`"])
         wrong = true
     end if
     if strings.same(result.kind, "program")
       and vec.length(result.programs) == 0 then
-        report.at_line(host, file, 0,
+        report.at_line(host, codes.line_missing, file, 0,
                        ["`kind program` and no `program` line; name each executable with `program NAME MODULE`"])
         wrong = true
     end if
@@ -87,7 +88,7 @@ read_line: (host: blocking.host, memory: lifetime.memory, file: []u8,
             escaping item: lines.line, inout into: description)
            -> none ! report.refused | mem.out_of_memory =
     if item.state <> lines.sound then
-        report.at_line(host, file, item.number, [lines.words_of(item.state)])
+        report.at_line(host, codes.line_unreadable, file, item.number, [lines.words_of(item.state)])
         fail report.refused
     end if
     words: [][]u8 = vec.used(item.words)
@@ -130,7 +131,7 @@ read_line: (host: blocking.host, memory: lifetime.memory, file: []u8,
                   "a program's module is a path inside the package, such as `cmd/build`: lowercase letters, digits and `_` between `/`")
         for other in vec.used(into.programs) do
             if strings.same(other.name, words[1]) then
-                report.at_line(host, file, item.number,
+                report.at_line(host, codes.said_twice, file, item.number,
                                ["the program `", words[1],
                                 "` is named twice; remove one of the lines"])
                 fail report.refused
@@ -159,7 +160,7 @@ read_line: (host: blocking.host, memory: lifetime.memory, file: []u8,
             try vec.push(into.uses, memory, wanted)
         end if
     else
-        report.at_line(host, file, item.number,
+        report.at_line(host, codes.keyword_unknown, file, item.number,
                        ["unknown keyword `", keyword,
                         "`; a description line starts with package, kind, licence, program, needs or uses, and a comment with `--` and a space"])
         fail report.refused
@@ -170,7 +171,7 @@ end read_line
 wants: (host: blocking.host, file: []u8, number: usize, holds: bool,
         otherwise: []u8) -> none ! report.refused =
     return when holds
-    report.at_line(host, file, number, [otherwise])
+    report.at_line(host, codes.line_shape, file, number, [otherwise])
     fail report.refused
 end wants
 
@@ -178,7 +179,7 @@ end wants
 once: (host: blocking.host, file: []u8, number: usize, first: bool,
        keyword: []u8) -> none ! report.refused =
     return when first
-    report.at_line(host, file, number,
+    report.at_line(host, codes.said_twice, file, number,
                    ["a second `", keyword,
                     "` line; a description has one, so remove one of them"])
     fail report.refused
@@ -188,7 +189,7 @@ end once
 unlike: (host: blocking.host, file: []u8, number: usize, listed: []u8,
          name: []u8) -> none ! report.refused =
     return when not strings.same(listed, name)
-    report.at_line(host, file, number,
+    report.at_line(host, codes.said_twice, file, number,
                    ["`", name,
                     "` is listed twice; a package is needed or used once, at one version"])
     fail report.refused
@@ -205,7 +206,7 @@ package_name: (host: blocking.host, file: []u8, number: usize, name: []u8)
                 and strings.is_segment(name[cut + 1..<lenof name])
     end if
     if not holds then
-        report.at_line(host, file, number,
+        report.at_line(host, codes.package_name, file, number,
                        ["`", name,
                         "` is no package name; write `owner/name`, each half lowercase letters, digits and `_`, since both become directories in an import path"])
         fail report.refused
@@ -213,7 +214,7 @@ package_name: (host: blocking.host, file: []u8, number: usize, name: []u8)
     owner: []u8 = name[0..<cut]
     if strings.same(owner, "core") or strings.same(owner, "hosted")
       or strings.same(owner, "platform") or strings.same(owner, "landin") then
-        report.at_line(host, file, number,
+        report.at_line(host, codes.package_name, file, number,
                        ["`", owner,
                         "` is the library's own namespace and cannot own a package; choose another owner"])
         fail report.refused

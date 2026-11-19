@@ -1,11 +1,19 @@
--- refine-build: runs a package's recipe.  `refine build` dispatches here.
+-- refine-build: runs a package's recipe.  It is a contributed command of
+-- `refine`, which runs a `refine-NAME` on PATH as `refine NAME`.
 --
 --     refine-build [--refine PATH] [--check] [STEP...]
+--     refine-build explain [CODE]
+--     refine-build --describe
+--     refine-build --complete -- WORD...
 --
 -- Run in a package's directory, it reads `landin.package` and
 -- `landin.recipe`, says everything that is wrong in them, and runs the
 -- steps asked for, or the recipe's `default` steps, or every step when it
 -- names none.  Each runs after the steps it takes inputs from.
+--
+-- The last three are what `refine` asks of a command it dispatches
+-- (Landin's D1385, D1387 and D1485): what a code means, what the command is
+-- and which codes are its own, and how the word being typed could end.
 --
 -- `--repeat N` is for the tool's own tests and is not in the help: it does
 -- the whole build N times in this one process, as a watch mode would, so
@@ -18,30 +26,49 @@ import core/text
 import core/vec
 import hosted/blocking
 import hosted/heap
+import dev701/refine_build/codes
 import dev701/refine_build/description
 import dev701/refine_build/files
 import dev701/refine_build/lifetime
 import dev701/refine_build/recipe
 import dev701/refine_build/report
 import dev701/refine_build/steps
+import dev701/refine_build/text/lines
 import dev701/refine_build/text/strings
 
 package_file: []u8 = "landin.package"
 recipe_file: []u8 = "landin.recipe"
 
 usage: []u8 = """usage: refine-build [--refine PATH] [--check] [STEP...]
+           refine-build explain [CODE]
 
     Run in a package's directory: reads landin.package and landin.recipe
     and runs the steps named, or the recipe's default steps.
 
       --refine PATH   the refine that `refine` in a run line means;
-                      without it, the first refine on PATH
+                      without it, the refine that ran this command,
+                      and then the first refine on PATH
       --check         read and check the two files, and run nothing
       -h, --help      print this and exit
+
+    `explain CODE` says what a code such as RB0102 means, and `explain`
+    alone lists the codes.
     """
+
+--  What `--describe` answers: Landin's `landin-command-1`, one JSON object
+--  that names the command, gives the line `refine help` shows for it, and
+--  claims the prefix of its codes.
+description_answer: []u8 = """{"format":"landin-command-1","name":"build","summary":"Run the steps of a package's recipe","codes":["RB"]}"""
+
+--- What the command line asks the tool to be.
+building: atom
+describing: atom
+explaining: atom
+completing: atom
 
 --- What the command line asked for.
 options: type = struct
+    mode: building | describing | explaining | completing
     refine: []u8
     check_only: bool
     help: bool
@@ -68,6 +95,22 @@ public main: () -> (code: i32) =
         io.write(host, io.out(host), usage) else none
         return
     end if
+    match asked.mode
+        describing: begin
+            io.write(host, io.out(host), description_answer) else none
+            io.write(host, io.out(host), "\n") else none
+            return
+        end
+        explaining: begin
+            code = explained(host, vec.used(asked.wanted))
+            return
+        end
+        completing: begin
+            completed(host, memory, vec.used(asked.wanted))
+            return
+        end
+        building: code = 0
+    end match
     mut round: usize = 0
     while round < asked.repeat do
         build(host, parent, asked) else (problem)
@@ -110,7 +153,7 @@ build: (host: blocking.host, parent: lifetime.parent, asked: options)
     for name in vec.used(asked.wanted) do
         index: usize = recipe.step_named(plan, name) else (problem)
             _ = problem
-            report.say(host,
+            report.say(host, codes.name_unknown,
                        ["no step `", name, "` in ", recipe_file,
                         "; name one of its steps, or none for its defaults"])
             fail report.refused
@@ -129,13 +172,13 @@ build: (host: blocking.host, parent: lifetime.parent, asked: options)
     end if
     return when asked.check_only
     for wanted in vec.used(about.needs) do
-        report.at_line(host, package_file, wanted.number,
+        report.at_line(host, codes.not_fetched, package_file, wanted.number,
                        ["`needs ", wanted.name,
                         "` is read and checked, but this refine-build fetches no package yet, so a step would not find it; remove the line to build"])
         fail report.refused
     end for
     for wanted in vec.used(about.uses) do
-        report.at_line(host, package_file, wanted.number,
+        report.at_line(host, codes.not_fetched, package_file, wanted.number,
                        ["`uses ", wanted.name,
                         "` is read and checked, but this refine-build fetches no tool yet; remove the line to build"])
         fail report.refused
@@ -152,20 +195,33 @@ end build
 --  Read the command line.  What it gives lives as long as `memory`.
 arguments: (host: blocking.host, memory: lifetime.memory)
            -> (asked: options) ! report.refused | wrong_usage =
-    asked = (refine: "", check_only: false, help: false, repeat: 1,
-             wanted: vec.new(item: []u8))
+    asked = (mode: building, refine: "", check_only: false, help: false,
+             repeat: 1, wanted: vec.new(item: []u8))
     count: usize = io.argument_count(host)
     mut at: usize = 0
     while at < count do
         word: []u8 = try argument(host, memory, at)
         inc at
-        if strings.same(word, "--help") or strings.same(word, "-h") then
+        if asked.mode <> building then
+            --  The words after `explain` and `--complete` are theirs, and
+            --  no option of the build's.
+            vec.push(asked.wanted, memory, word) else (problem)
+                said(host, problem)
+                fail report.refused
+            end
+        elsif at == 1 and strings.same(word, "--describe") then
+            asked.mode = describing
+        elsif at == 1 and strings.same(word, "explain") then
+            asked.mode = explaining
+        elsif at == 1 and strings.same(word, "--complete") then
+            asked.mode = completing
+        elsif strings.same(word, "--help") or strings.same(word, "-h") then
             asked.help = true
         elsif strings.same(word, "--check") then
             asked.check_only = true
         elsif strings.same(word, "--refine") then
             if at == count then
-                report.say(host, ["`--refine` takes a path: `--refine PATH`"])
+                report.say(host, codes.command_line, ["`--refine` takes a path: `--refine PATH`"])
                 fail wrong_usage
             end if
             asked.refine = try whole_path(host, memory,
@@ -173,20 +229,20 @@ arguments: (host: blocking.host, memory: lifetime.memory)
             inc at
         elsif strings.same(word, "--repeat") then
             if at == count then
-                report.say(host, ["`--repeat` takes a count: `--repeat N`"])
+                report.say(host, codes.command_line, ["`--repeat` takes a count: `--repeat N`"])
                 fail wrong_usage
             end if
             times: []u8 = try argument(host, memory, at)
             asked.repeat = text.parse_usize(times) else (problem)
                 _ = problem
-                report.say(host,
+                report.say(host, codes.command_line,
                            ["`--repeat ", times,
                             "`: the count is a whole number"])
                 fail wrong_usage
             end
             inc at
         elsif strings.starts(word, "-") then
-            report.say(host,
+            report.say(host, codes.command_line,
                        ["unknown option `", word,
                         "`; `refine-build --help` lists the options"])
             fail wrong_usage
@@ -197,7 +253,110 @@ arguments: (host: blocking.host, memory: lifetime.memory)
             end
         end if
     end while
+    if asked.mode == building and lenof asked.refine == 0 then
+        asked.refine = try caller(host, memory)
+    end if
 end arguments
+
+--  The refine that dispatched this command, which it names in
+--  `LANDIN_REFINE` as an absolute path (Landin's D1486), or nothing when
+--  the tool was run by its own name or the host could not name it.
+caller: (host: blocking.host, memory: lifetime.memory) -> (path: []u8)
+        ! report.refused =
+    path = ""
+    named: text.host_string =
+        io.variable_named(host, text.host_over("LANDIN_REFINE"))
+        else (problem)
+            _ = problem
+            return
+        end
+    given: []u8 = text.host_bytes(named)
+    return when lenof given == 0
+    return when given[0] <> u8('/')
+    path = strings.keep(memory, given) else (problem)
+        said(host, problem)
+        fail report.refused
+    end
+end caller
+
+--  `explain CODE` says what the code means; `explain` alone lists the
+--  codes, one a line.  The status is 0, or 2 for a code there is none of.
+explained: (host: blocking.host, words: [][]u8) -> (status: i32) =
+    status = 0
+    if lenof words == 0 then
+        for index in usize(0)..<codes.count() do
+            io.write(host, io.out(host), codes.spelled(codes.at(index)))
+                else none
+            io.write(host, io.out(host), "\n") else none
+        end for
+        return
+    end if
+    which: codes.code = codes.named(words[0]) else (problem)
+        _ = problem
+        report.say(host, codes.command_line,
+                   ["`explain ", words[0],
+                    "`: refine-build has no such code; `refine-build explain` lists its codes"])
+        status = 2
+        return
+    end
+    --  The explanation opens with a line end of its own.
+    io.write(host, io.out(host), codes.spelled(which)) else none
+    io.write(host, io.out(host), codes.about(which)) else none
+end explained
+
+--  `--complete -- WORD...`: the words after the command's name up to the
+--  one being typed, which is last and may be empty.  Answers with the ways
+--  that word could end, one a line: an option, a code after `explain`, or
+--  a step of the recipe in this directory.  A recipe that cannot be read
+--  gives no steps and no complaint: a completion says nothing but words.
+completed: (host: blocking.host, memory: lifetime.memory, given: [][]u8)
+           -> none =
+    mut words: [][]u8 = given
+    if lenof words > 0 and strings.same(words[0], "--") then
+        words = words[1..<lenof words]
+    end if
+    return when lenof words == 0
+    typed: []u8 = words[lenof words - 1]
+    if lenof words > 1 then
+        before: []u8 = words[lenof words - 2]
+        return when strings.same(before, "--refine")
+        if strings.same(words[0], "explain") then
+            return when lenof words > 2
+            for index in usize(0)..<codes.count() do
+                offered(host, typed, codes.spelled(codes.at(index)))
+            end for
+            return
+        end if
+    end if
+    if strings.starts(typed, "-") then
+        offered(host, typed, "--check")
+        offered(host, typed, "--help")
+        offered(host, typed, "--refine")
+        return
+    end if
+    if lenof words == 1 then offered(host, typed, "explain") end if
+    source: []u8 = files.read_all(host, memory, recipe_file) else (problem)
+        _ = problem
+        return
+    end
+    read: lines.document = lines.read(memory, source) else (problem)
+        _ = problem
+        return
+    end
+    for item in vec.used(read.lines) do
+        named: [][]u8 = vec.used(item.words)
+        if lenof named > 1 and strings.same(named[0], "step") then
+            offered(host, typed, named[1])
+        end if
+    end for
+end completed
+
+--  Print `candidate` when it starts as the word being typed does.
+offered: (host: blocking.host, typed: []u8, candidate: []u8) -> none =
+    return when not strings.starts(candidate, typed)
+    io.write(host, io.out(host), candidate) else none
+    io.write(host, io.out(host), "\n") else none
+end offered
 
 --  A copy of the argument at `index`.
 argument: (host: blocking.host, memory: lifetime.memory, index: usize)
@@ -218,7 +377,7 @@ whole_path: (host: blocking.host, memory: lifetime.memory, given: []u8)
             -> (path: []u8) ! report.refused =
     found: []u8 = files.program(host, memory, given) else (problem)
         _ = problem
-        report.say(host, ["`--refine ", given, "`: no such program on PATH"])
+        report.say(host, codes.no_refine, ["`--refine ", given, "`: no such program on PATH"])
         fail report.refused
     end
     if found[0] == u8('/') then
@@ -240,10 +399,10 @@ content: (host: blocking.host, memory: lifetime.memory, file: []u8)
          -> (source: []u8) ! report.refused =
     source = files.read_all(host, memory, file) else (problem)
         if problem == io.not_found then
-            report.at_line(host, file, 0,
+            report.at_line(host, codes.file_unread, file, 0,
                            ["not found; run refine-build in a package's directory, which holds its landin.package and landin.recipe"])
         else
-            report.at_line(host, file, 0, [failure.words(problem)])
+            report.at_line(host, codes.file_unread, file, 0, [failure.words(problem)])
         end if
         fail report.refused
     end
@@ -263,6 +422,6 @@ said: (host: blocking.host, problem: failure.reason | report.refused)
       -> none =
     match problem
         report.refused: return
-        _ (rest): report.say(host, [failure.words(rest)])
+        _ (rest): report.say(host, codes.host_refused, [failure.words(rest)])
     end match
 end said

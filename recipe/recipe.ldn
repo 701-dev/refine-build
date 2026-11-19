@@ -18,6 +18,7 @@
 import core/mem
 import core/vec
 import hosted/blocking
+import dev701/refine_build/codes
 import dev701/refine_build/lifetime
 import dev701/refine_build/report
 import dev701/refine_build/text/lines
@@ -113,7 +114,7 @@ read_line: (host: blocking.host, memory: lifetime.memory, file: []u8,
             inout default_names: vec.list(lines.line))
            -> none ! report.refused | mem.out_of_memory =
     if item.state <> lines.sound then
-        report.at_line(host, file, item.number, [lines.words_of(item.state)])
+        report.at_line(host, codes.line_unreadable, file, item.number, [lines.words_of(item.state)])
         fail report.refused
     end if
     words: [][]u8 = vec.used(item.words)
@@ -135,6 +136,9 @@ read_line: (host: blocking.host, memory: lifetime.memory, file: []u8,
         where = nowhere
         try wants(host, file, item.number, given >= 2,
                   "`step` takes a name and a rule: `step NAME RULE from INPUT... with INPUT...`")
+        try wants(host, file, item.number,
+                  not strings.same(words[1], "explain"),
+                  "a step cannot be named `explain`, since `refine-build explain CODE` explains a code; give the step another name")
         for other in vec.used(into.steps) do
             try unlike(host, file, item.number, "step", other.name, words[1])
         end for
@@ -153,7 +157,7 @@ read_line: (host: blocking.host, memory: lifetime.memory, file: []u8,
                 direct = false
                 chosen = true
             elsif not chosen then
-                report.at_line(host, file, item.number,
+                report.at_line(host, codes.line_shape, file, item.number,
                                ["`", word,
                                 "` follows the rule's name; write `from` before the inputs `{in}` names and `with` before those only made visible"])
                 fail report.refused
@@ -178,7 +182,7 @@ read_line: (host: blocking.host, memory: lifetime.memory, file: []u8,
             fail report.refused
         end
         if last.val.run_number > 0 then
-            report.at_line(host, file, item.number,
+            report.at_line(host, codes.said_twice, file, item.number,
                            ["a second `run` line in rule `", last.val.name,
                             "`; a rule runs one program, so make a second rule and a second step"])
             fail report.refused
@@ -229,7 +233,7 @@ read_line: (host: blocking.host, memory: lifetime.memory, file: []u8,
                   "`default` takes the steps to run when none is asked for: `default STEP...`")
         try vec.push(default_names, memory, item)
     else
-        report.at_line(host, file, item.number,
+        report.at_line(host, codes.keyword_unknown, file, item.number,
                        ["unknown keyword `", keyword,
                         "`; a recipe line starts with rule, run, set, step or default, and a comment with `--` and a space"])
         fail report.refused
@@ -240,7 +244,7 @@ end read_line
 wants: (host: blocking.host, file: []u8, number: usize, holds: bool,
         otherwise: []u8) -> none ! report.refused =
     return when holds
-    report.at_line(host, file, number, [otherwise])
+    report.at_line(host, codes.line_shape, file, number, [otherwise])
     fail report.refused
 end wants
 
@@ -248,7 +252,7 @@ end wants
 unlike: (host: blocking.host, file: []u8, number: usize, kind: []u8,
          taken: []u8, name: []u8) -> none ! report.refused =
     return when not strings.same(taken, name)
-    report.at_line(host, file, number,
+    report.at_line(host, codes.said_twice, file, number,
                    ["a second `", kind, " ", name,
                     "`; give one of the two another name"])
     fail report.refused

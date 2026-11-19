@@ -1,0 +1,2 @@
+{"format":"landin-command-1","name":"build","summary":"Run the steps of a package's recipe","codes":["RB"]}
+[exit 0]

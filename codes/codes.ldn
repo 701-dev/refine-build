@@ -1,0 +1,232 @@
+-- The codes refine-build's refusals carry, and what each one means.
+--
+-- This is the one place a code is spelled and explained.  A refusal names
+-- its code by the atom declared here, so the tool can print no code this
+-- file does not explain: `spelled` and `about` each match every atom, and
+-- a missing arm does not compile.
+--
+-- The prefix `RB` is the one `refine-build --describe` claims, so that
+-- `refine explain RB0102` is forwarded here (Landin's D1385).  Landin's
+-- own codes start with `L` and are never ours.
+
+import dev701/refine_build/text/strings
+
+--- The prefix every code here starts with, as `--describe` claims it.
+public prefix: []u8 = "RB"
+
+public command_line: atom
+public file_unread: atom
+public host_refused: atom
+public no_refine: atom
+public line_unreadable: atom
+public keyword_unknown: atom
+public line_shape: atom
+public said_twice: atom
+public package_name: atom
+public line_missing: atom
+public not_fetched: atom
+public rule_runs_nothing: atom
+public placeholder: atom
+public name_unknown: atom
+public steps_circle: atom
+public input_unknown: atom
+public step_shadows_path: atom
+public program_missing: atom
+public program_unstarted: atom
+public step_failed: atom
+
+--- One kind of thing the tool refuses.
+public code: type =
+    command_line | file_unread | host_refused | no_refine | line_unreadable |
+    keyword_unknown | line_shape | said_twice | package_name | line_missing |
+    not_fetched | rule_runs_nothing | placeholder | name_unknown |
+    steps_circle | input_unknown | step_shadows_path | program_missing |
+    program_unstarted | step_failed
+
+--- No code is spelled that way.
+public unknown: atom
+
+--- Every code, in the order `refine-build explain` lists them.
+all: [20]code = [command_line, file_unread, host_refused, no_refine,
+                 line_unreadable, keyword_unknown, line_shape, said_twice,
+                 package_name, line_missing, not_fetched, rule_runs_nothing,
+                 placeholder, name_unknown, steps_circle, input_unknown,
+                 step_shadows_path, program_missing, program_unstarted,
+                 step_failed]
+
+--- How many codes there are.
+public count: () -> (number: usize) =
+    number = lenof all
+end count
+
+--- The code at `index` of the list, which is below `count()`.
+public at: (index: usize) -> (which: code) =
+    which = all[index]
+end at
+
+--- The code `spelling` spells, as `RB0102` does `keyword_unknown`.
+public named: (spelling: []u8) -> (which: code) ! unknown =
+    for candidate in all do
+        if strings.same(spelled(candidate), spelling) then
+            which = candidate
+            return
+        end if
+    end for
+    fail unknown
+end named
+
+--- How `which` is spelled where the tool prints it.
+public spelled: (which: code) -> (spelling: []u8) =
+    match which
+        command_line: spelling = "RB0001"
+        file_unread: spelling = "RB0002"
+        host_refused: spelling = "RB0003"
+        no_refine: spelling = "RB0004"
+        line_unreadable: spelling = "RB0101"
+        keyword_unknown: spelling = "RB0102"
+        line_shape: spelling = "RB0103"
+        said_twice: spelling = "RB0104"
+        package_name: spelling = "RB0201"
+        line_missing: spelling = "RB0202"
+        not_fetched: spelling = "RB0203"
+        rule_runs_nothing: spelling = "RB0301"
+        placeholder: spelling = "RB0302"
+        name_unknown: spelling = "RB0303"
+        steps_circle: spelling = "RB0304"
+        input_unknown: spelling = "RB0305"
+        step_shadows_path: spelling = "RB0306"
+        program_missing: spelling = "RB0401"
+        program_unstarted: spelling = "RB0402"
+        step_failed: spelling = "RB0403"
+    end match
+end spelled
+
+--- What `refine-build explain` says about `which`.
+public about: (which: code) -> (words: []u8) =
+    match which
+        command_line: words = """
+            The command line is not one refine-build understands: an option
+            it does not have, an option without its value, or a code that
+            `explain` does not know. `refine-build --help` lists the
+            options. The status is 2.
+            """
+        file_unread: words = """
+            A file the build needs is not there or cannot be read.
+            refine-build runs in a package's directory, which holds
+            `landin.package`, the description, and `landin.recipe`, the
+            recipe. The message names the file and what the host said.
+            """
+        host_refused: words = """
+            The host refused something the tool asked of it: memory, a
+            directory, a link or a write under `.landin/`. The message
+            carries the host's reason. Nothing in the two files is wrong;
+            look at the disk, the permissions of `.landin/` and the memory
+            the process may take.
+            """
+        no_refine: words = """
+            A `run` line's first word is `refine`, which means the refine
+            that started this build, and none is known. `refine build`
+            tells the tool which refine ran it. Run by its own name, the
+            tool takes `--refine PATH`, and without it the first `refine`
+            on PATH; here there was none, or the path names no program.
+            """
+        line_unreadable: words = """
+            A line cannot be cut into words. A word in double quotes has to
+            close on its line and takes Landin's escapes, `\n`, `\t`,
+            `\"`, `\\` and `\u{...}`; a quote inside a bare word is not
+            one. The message says what stopped the reader.
+            """
+        keyword_unknown: words = """
+            Every line starts with a keyword, and this one starts with a
+            word that is none. A description's are `package`, `kind`,
+            `licence`, `program`, `needs` and `uses`; a recipe's are
+            `rule`, `run`, `set`, `step` and `default`. A comment is the
+            word `--` followed by a space, so `--root` is a word and no
+            comment.
+            """
+        line_shape: words = """
+            The keyword is known and the words after it are not what it
+            takes: too few, too many, or one of the wrong form. The message
+            gives the line's form. In a recipe this is also a `run` or
+            `set` with no `rule` or `step` before it, and a step's inputs
+            without `from` or `with`.
+            """
+        said_twice: words = """
+            Something that is there once is there twice: a second `kind` or
+            `package` line, a program, rule or step named twice, a package
+            listed twice among `needs` and `uses`, or a second `run` in one
+            rule. Remove one, or give one of the two another name. A rule
+            runs one program; a second program is a second rule and step.
+            """
+        package_name: words = """
+            A package's name is `owner/name`. Both halves become
+            directories in an import path, so each is lowercase letters,
+            digits and `_` and starts with a letter or `_`. The owners
+            `core`, `hosted`, `platform` and `landin` are the library's
+            and the toolchain's and own no package.
+            """
+        line_missing: words = """
+            The description lacks a line it needs: `package owner/name`,
+            which every description has, or, for `kind program`, a
+            `program NAME MODULE` line for each executable.
+            """
+        not_fetched: words = """
+            The description has a `needs` or `uses` line. Both are read and
+            checked, and this refine-build fetches no package yet, so a
+            step would not find it in `packages`. `--check` still reads the
+            files; to build, remove the line.
+            """
+        rule_runs_nothing: words = """
+            A rule has no `run` line, so a step that names it would start
+            nothing. Write `run PROGRAM WORDS...` under the rule.
+            """
+        placeholder: words = """
+            A `{name}` in a `run` line and the `set` lines do not agree.
+            `{out}` is the step's output directory and `{in}` its `from`
+            inputs; `{in}` stands for several words and is a word of its
+            own. Any other `{name}` needs a `set name VALUE` under the step
+            or the rule, a `set` that no `run` line uses is refused, and a
+            brace itself is written `{{` or `}}`.
+            """
+        name_unknown: words = """
+            A name names nothing: a step names a rule the recipe does not
+            have, `default` names a step it does not have, or the command
+            line asks for one. The message gives the name; check its
+            spelling against the recipe.
+            """
+        steps_circle: words = """
+            A step takes an input from a step that, directly or through
+            others, takes one from it. A step runs after every step it
+            names, so there is no order to run these in. One of them has to
+            stop naming the other.
+            """
+        input_unknown: words = """
+            An input after `from` or `with` is `packages`, the name of a
+            step, or a path inside the project: no `..`, not starting with
+            `/`, and a file or directory that exists. This one is none of
+            them.
+            """
+        step_shadows_path: words = """
+            A step has the name of a file or directory in the project, so
+            an input of that name could mean either. Give the step another
+            name.
+            """
+        program_missing: words = """
+            The program a step runs was not found. A first word with a `/`
+            is a path in the step's view, so the program has to be an input
+            of the step or inside one; any other word is looked for on
+            PATH. Each step is started through `env -C`, so `env` has to be
+            on PATH as well.
+            """
+        program_unstarted: words = """
+            The program was found and the host would not start it, or the
+            tool lost it while it ran. The message carries the host's
+            reason; a file that is not executable is the usual one.
+            """
+        step_failed: words = """
+            A step's program ended with a status other than 0, or a signal
+            ended it. What the program said is above the message. The build
+            stops at the first step that fails, and its status is 1.
+            """
+    end match
+end about

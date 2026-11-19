@@ -15,6 +15,11 @@
 #  more memory than the few: a build gives back all it took.  It needs a
 #  `time` program that takes `-f %M`, GNU's, and says so when there is none.
 #
+#  The codes check asks the tool to explain every code it lists and holds
+#  the list to `codes/codes.ldn` and to what the cases expect.  With REFINE,
+#  the dispatcher check runs the tool through `refine` as a contributed
+#  command: a build, help, a forwarded explanation and a completion.
+#
 #  A case is a directory: `command` holds the arguments, one line of plain
 #  words; `expected` what both streams said, then `[exit N]`; `produces`,
 #  when it is there, the files that must exist afterwards.  Each case runs
@@ -64,7 +69,7 @@ done
 if [ -n "$refine" ]; then
     count=$((count + 1))
     root=$(dirname "$here")
-    if ! (cd "$root" && "$build" --refine "$refine" > "$scratch/self.said" 2>&1); then
+    if ! (cd "$root" && env -u LANDIN_REFINE "$build" --refine "$refine" > "$scratch/self.said" 2>&1); then
         cat "$scratch/self.said"
         echo "FAILED self-build: the tool did not build itself"
         failed=$((failed + 1))
@@ -72,6 +77,100 @@ if [ -n "$refine" ]; then
         echo "FAILED self-build: the tool built differs from the tool that built it"
         failed=$((failed + 1))
     fi
+fi
+#  Every code the tool can print is explained.  `explain` lists the codes;
+#  each has to explain itself, each atom of `codes/codes.ldn` has to be in
+#  the list, and no `expected` may show a code the list lacks.
+count=$((count + 1))
+root=$(dirname "$here")
+"$build" explain > "$scratch/codes"
+catalogue=ok
+while IFS= read -r code; do
+    if ! "$build" explain "$code" > "$scratch/explained" 2>&1 \
+        || [ "$(wc -l < "$scratch/explained")" -lt 2 ]; then
+        echo "FAILED codes: $code is not explained"
+        catalogue=no
+    fi
+done < "$scratch/codes"
+#  `unknown` is the one atom there that is no code.
+declared=$(($(grep -c '^public [a-z_]*: atom$' "$root/codes/codes.ldn") - 1))
+listed=$(wc -l < "$scratch/codes")
+if [ "$declared" -ne "$listed" ]; then
+    echo "FAILED codes: codes.ldn declares $declared codes and \`explain\` lists $listed"
+    catalogue=no
+fi
+grep -h -o 'error\[[A-Z]*[0-9]*\]' "$here"/cases/*/expected \
+    | sed 's/error\[\(.*\)\]/\1/' | sort -u > "$scratch/expected-codes"
+while IFS= read -r code; do
+    if ! grep -q -x "$code" "$scratch/codes"; then
+        echo "FAILED codes: a case expects $code, which \`explain\` does not list"
+        catalogue=no
+    fi
+done < "$scratch/expected-codes"
+[ "$catalogue" = ok ] || failed=$((failed + 1))
+#  Through refine's dispatcher, as a contributed command on PATH.  `refine`
+#  reserves the word `build` and dispatches nothing under it, so the tool
+#  is put on PATH as `refine-bld`: a wrapper that changes the name in what
+#  `--describe` answers and nothing else.
+if [ -n "$refine" ]; then
+    count=$((count + 1))
+    tools=$scratch/tools
+    mkdir "$tools"
+    {
+        echo '#!/bin/sh'
+        # shellcheck disable=SC2016  # written into the wrapper as it stands
+        echo 'if [ "$1" = --describe ]; then'
+        echo "    \"$build\" --describe | sed 's/\"name\":\"build\"/\"name\":\"bld\"/'"
+        echo 'else'
+        echo "    exec \"$build\" \"\$@\""
+        echo 'fi'
+    } > "$tools/refine-bld"
+    chmod +x "$tools/refine-bld"
+    dispatched=ok
+    #  ran WHAT COMMAND...: run COMMAND with the tool on PATH, keep what it
+    #  said in $scratch/ran, and fail the check when it did not end with 0.
+    #  The caller's LANDIN_REFINE names nothing: refine replaces it.
+    ran() {
+        what=$1
+        shift
+        if ! PATH="$tools:$PATH" LANDIN_REFINE=/nowhere/refine "$@" \
+            > "$scratch/ran" 2>&1; then
+            cat "$scratch/ran"
+            echo "FAILED dispatcher: $what"
+            dispatched=no
+        fi
+    }
+    #  holds WHAT TEXT: what the last command said has the line TEXT.
+    holds() {
+        if ! grep -q -x -F -e "$2" "$scratch/ran"; then
+            cat "$scratch/ran"
+            echo "FAILED dispatcher: $1"
+            dispatched=no
+        fi
+    }
+    #  The refine that dispatched is the one the steps run: no --refine.
+    rm -rf "$root/.landin/steps"
+    cd "$root"
+    ran "refine bld did not build this package" "$refine" bld
+    if ! cmp "$build" "$root/.landin/steps/tool/out/refine-build"; then
+        echo "FAILED dispatcher: refine bld built something else than the tool"
+        dispatched=no
+    fi
+    ran "refine help did not run" "$refine" help
+    holds "refine help does not list the command" \
+        "  bld         Run the steps of a package's recipe ($tools/refine-bld)"
+    ran "refine help bld did not run" "$refine" help bld
+    holds "refine help bld is not the tool's own help" \
+        "usage: refine-build [--refine PATH] [--check] [STEP...]"
+    ran "refine explain RB0102 was not forwarded" "$refine" explain RB0102
+    holds "the forwarded explanation is not announced as the tool's" \
+        "RB0102 is explained by refine-bld at $tools/refine-bld, not by Landin"
+    holds "the forwarded explanation is not the tool's" \
+        "Every line starts with a keyword, and this one starts with a"
+    ran "refine bld --complete did not run" "$refine" bld --complete -- --ch
+    holds "completion through refine does not offer the option" "--check"
+    cd "$here"
+    [ "$dispatched" = ok ] || failed=$((failed + 1))
 fi
 #  peak NAME ARGUMENTS...: the peak resident size, in KiB, of the tool
 #  run in the case NAME with ARGUMENTS.

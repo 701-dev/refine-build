@@ -1,2 +1,2 @@
-refine-build: unknown option `--wat`; `refine-build --help` lists the options
+error[RB0001]: unknown option `--wat`; `refine-build --help` lists the options
 [exit 2]

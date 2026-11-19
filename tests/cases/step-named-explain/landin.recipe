@@ -1,0 +1,4 @@
+rule say
+    run  echo done
+
+step explain  say
