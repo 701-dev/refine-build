@@ -9,7 +9,7 @@ set in x
 set Big x
 rule copy
 step
-step one
+step lone
 step one copy extra
 step one copy from a.txt
 step one copy

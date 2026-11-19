@@ -1,17 +1,16 @@
-error[RB0103]: landin.recipe:1: `run` belongs to a rule; write `rule NAME` on a line before it
+error[RB0103]: landin.recipe:1: `run` belongs to a rule, or to a step that names none; write `rule NAME` or `step NAME` on a line before it
 error[RB0103]: landin.recipe:2: `set` belongs to a rule or a step; write it on a line after one
 error[RB0103]: landin.recipe:3: `rule` takes one word: `rule NAME`
-error[RB0104]: landin.recipe:6: a second `run` line in rule `copy`; a rule runs one program, so make a second rule and a second step
+error[RB0104]: landin.recipe:6: a second `run` line in rule `copy`; one `run` line runs one program, so make a second step for the second
 error[RB0103]: landin.recipe:7: `set` takes a name and one value: `set NAME VALUE`; quote a value with spaces
 error[RB0103]: landin.recipe:8: `{in}` and `{out}` are the tool's own; choose another name
 error[RB0103]: landin.recipe:9: a `set` name is lowercase letters, digits and `_`
 error[RB0104]: landin.recipe:10: a second `rule copy`; give one of the two another name
-error[RB0103]: landin.recipe:11: `step` takes a name and a rule: `step NAME RULE from INPUT... with INPUT...`
-error[RB0103]: landin.recipe:12: `step` takes a name and a rule: `step NAME RULE from INPUT... with INPUT...`
+error[RB0103]: landin.recipe:11: `step` takes a name, and a rule unless it has a `run` line of its own: `step NAME RULE from INPUT... with INPUT...`
 error[RB0103]: landin.recipe:13: `extra` follows the rule's name; write `from` before the inputs `{in}` names and `with` before those only made visible
 error[RB0104]: landin.recipe:15: a second `step one`; give one of the two another name
 error[RB0103]: landin.recipe:16: `set` belongs to a rule or a step; write it on a line after one
 error[RB0102]: landin.recipe:17: unknown keyword `stpe`; a recipe line starts with rule, run, set, step or default, and a comment with `--` and a space
 error[RB0103]: landin.recipe:18: `default` takes the steps to run when none is asked for: `default STEP...`
-error[RB0103]: landin.recipe:21: `run` belongs to a rule, and this one follows a step; put it under the step's rule
+error[RB0103]: landin.recipe:21: step `x` names the rule `late`, which says what it runs; put this `run` under that rule, or take the rule's name off the `step` line
 [exit 1]

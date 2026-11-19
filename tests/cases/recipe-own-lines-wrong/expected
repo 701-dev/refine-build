@@ -1,0 +1,6 @@
+error[RB0103]: landin.recipe:3: a rule cannot be named `from` or `with`: after a step's name they start its inputs; give the rule another name
+error[RB0103]: landin.recipe:4: a rule cannot be named `from` or `with`: after a step's name they start its inputs; give the rule another name
+error[RB0103]: landin.recipe:5: `run` belongs to a rule, or to a step that names none; write `rule NAME` or `step NAME` on a line before it
+error[RB0104]: landin.recipe:8: a second `run` line in step `both`; one `run` line runs one program, so make a second step for the second
+error[RB0103]: landin.recipe:10: step `named` names the rule `copy`, which says what it runs; put this `run` under that rule, or take the rule's name off the `step` line
+[exit 1]

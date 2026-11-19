@@ -1,4 +1,4 @@
-error[RB0302]: landin.recipe:5: nothing in rule `copy` uses `{nmae}`; check the name against the rule's `run` line or remove the `set`
+error[RB0302]: landin.recipe:5: nothing in rule `copy` uses `{nmae}`; check the name against its `run` line or remove the `set`
 error[RB0302]: landin.recipe:4: rule `copy` uses `{name}`, and step `one` gives it no value; write `set name VALUE` under the step or under the rule
 error[RB0303]: landin.recipe:6: step `two` names the rule `missing`, and the recipe has none of that name; write `rule missing` with its `run` line
 error[RB0103]: landin.recipe:7: `packages` is the input the tool supplies; give the step another name

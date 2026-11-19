@@ -5,10 +5,17 @@
 --         set  NAME VALUE
 --     step NAME RULE [from INPUT...] [with INPUT...]
 --         set  NAME VALUE
+--     step NAME [from INPUT...] [with INPUT...]
+--         run  PROGRAM WORDS...
+--         set  NAME VALUE
 --     default STEP...
 --
 -- Every line starts with a keyword; `run` and `set` belong to the `rule` or
--- `step` before them, and indentation means nothing.  A `run` line is a
+-- `step` before them, and indentation means nothing.  A step names a rule,
+-- or has a `run` line of its own and names none: the word after its name
+-- is then `from`, `with` or missing, so no rule is called `from` or `with`.
+-- `set always yes` under a step is the tool's own: the step runs every
+-- time, whatever the store keeps (see `steps`).  A `run` line is a
 -- word list, started directly and never given to a shell.  In it, `{out}`
 -- is the step's output directory, `{in}` the step's `from` inputs, each a
 -- word, and `{NAME}` what a `set NAME` of the step or of the rule gave;
@@ -32,9 +39,11 @@ public setting: type = struct
 end setting
 
 --- A rule: how to run a program.  `run_number` is 0 while it has no `run`
---- line.
+--- line.  A step with a `run` line of its own has a rule of its own, `own`,
+--- which carries the step's name.
 public rule: type = struct
     name: []u8
+    own: bool
     number: usize
     run: vec.list([]u8)
     run_number: usize
@@ -47,6 +56,7 @@ end rule
 public step: type = struct
     name: []u8
     number: usize
+    own: bool
     rule_name: []u8
     rule_at: usize
     direct: vec.list([]u8)
@@ -60,6 +70,10 @@ public recipe: type = struct
     steps: vec.list(step)
     defaults: vec.list(usize)
 end recipe
+
+--- The `set` name that is the tool's own: `set always yes` under a step
+--- has it run every time.
+public always: []u8 = "always"
 
 --- The input every step may name: the packages the description needs, and
 --- the package itself, each under its owner/name path.
@@ -124,32 +138,51 @@ read_line: (host: blocking.host, memory: lifetime.memory, file: []u8,
         where = nowhere
         try wants(host, file, item.number, given == 1,
                   "`rule` takes one word: `rule NAME`")
+        try wants(host, file, item.number,
+                  not strings.same(words[1], "from")
+                  and not strings.same(words[1], "with"),
+                  "a rule cannot be named `from` or `with`: after a step's name they start its inputs; give the rule another name")
         for other in vec.used(into.rules) do
+            continue when other.own
             try unlike(host, file, item.number, "rule", other.name, words[1])
         end for
-        made: rule = (name: words[1], number: item.number,
+        made: rule = (name: words[1], own: false, number: item.number,
                       run: vec.new(item: []u8), run_number: 0,
                       sets: vec.new(item: setting))
         try vec.push(into.rules, memory, made)
         where = in_rule
     elsif strings.same(keyword, "step") then
         where = nowhere
-        try wants(host, file, item.number, given >= 2,
-                  "`step` takes a name and a rule: `step NAME RULE from INPUT... with INPUT...`")
+        try wants(host, file, item.number, given >= 1,
+                  "`step` takes a name, and a rule unless it has a `run` line of its own: `step NAME RULE from INPUT... with INPUT...`")
         try wants(host, file, item.number,
                   not strings.same(words[1], "explain"),
                   "a step cannot be named `explain`, since `refine-build explain CODE` explains a code; give the step another name")
         for other in vec.used(into.steps) do
             try unlike(host, file, item.number, "step", other.name, words[1])
         end for
-        mut made: step = (name: words[1], number: item.number,
-                          rule_name: words[2], rule_at: 0,
+        --  Without a rule's name the step has a rule of its own, which its
+        --  `run` line fills.
+        own: bool = given == 1 or strings.same(words[2], "from")
+                    or strings.same(words[2], "with")
+        first: usize = if own then usize(2) else usize(3) end if
+        mut made: step = (name: words[1], number: item.number, own: own,
+                          rule_name: "", rule_at: 0,
                           direct: vec.new(item: []u8),
                           beside: vec.new(item: []u8),
                           sets: vec.new(item: setting))
+        if own then
+            made.rule_at = vec.length(into.rules)
+            alone: rule = (name: words[1], own: true, number: item.number,
+                           run: vec.new(item: []u8), run_number: 0,
+                           sets: vec.new(item: setting))
+            try vec.push(into.rules, memory, alone)
+        else
+            made.rule_name = words[2]
+        end if
         mut direct: bool = false
         mut chosen: bool = false
-        for word in words[3..<lenof words] do
+        for word in words[first..<lenof words] do
             if strings.same(word, "from") then
                 direct = true
                 chosen = true
@@ -171,20 +204,34 @@ read_line: (host: blocking.host, memory: lifetime.memory, file: []u8,
         where = in_step
     elsif strings.same(keyword, "run") then
         try wants(host, file, item.number, where <> nowhere,
-                  "`run` belongs to a rule; write `rule NAME` on a line before it")
-        try wants(host, file, item.number, where == in_rule,
-                  "`run` belongs to a rule, and this one follows a step; put it under the step's rule")
+                  "`run` belongs to a rule, or to a step that names none; write `rule NAME` or `step NAME` on a line before it")
         try wants(host, file, item.number, given >= 1,
                   "`run` takes the program and its words: `run PROGRAM WORDS...`")
-        last: ptr mut rule = vec.at(into.rules, vec.length(into.rules) - 1)
-            else (problem)
+        mut at_rule: usize = vec.length(into.rules) - 1
+        if where == in_step then
+            under: step = vec.get(into.steps, vec.length(into.steps) - 1)
+                else (problem)
+                _ = problem
+                fail report.refused
+            end
+            if not under.own then
+                report.at_line(host, codes.line_shape, file, item.number,
+                               ["step `", under.name, "` names the rule `",
+                                under.rule_name,
+                                "`, which says what it runs; put this `run` under that rule, or take the rule's name off the `step` line"])
+                fail report.refused
+            end if
+            at_rule = under.rule_at
+        end if
+        last: ptr mut rule = vec.at(into.rules, at_rule) else (problem)
             _ = problem
             fail report.refused
         end
         if last.val.run_number > 0 then
             report.at_line(host, codes.said_twice, file, item.number,
-                           ["a second `run` line in rule `", last.val.name,
-                            "`; a rule runs one program, so make a second rule and a second step"])
+                           ["a second `run` line in ", kind_of(last.val), " `",
+                            last.val.name,
+                            "`; one `run` line runs one program, so make a second step for the second"])
             fail report.refused
         end if
         last.val.run_number = item.number
@@ -239,6 +286,11 @@ read_line: (host: blocking.host, memory: lifetime.memory, file: []u8,
         fail report.refused
     end if
 end read_line
+
+--  What a rule is called where it is spoken of: a step's own is the step.
+kind_of: (how: rule) -> (word: []u8) =
+    word = if how.own then "step" else "rule" end if
+end kind_of
 
 --  Refuse the line with `otherwise` unless `holds`.
 wants: (host: blocking.host, file: []u8, number: usize, holds: bool,

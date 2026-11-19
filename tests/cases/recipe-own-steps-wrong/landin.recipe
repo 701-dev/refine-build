@@ -1,0 +1,12 @@
+-- A step's own `run` line is checked as a rule's is, and `set always`
+-- takes yes or no.
+rule copy
+    run cp {in} {out}
+step named copy from a.txt
+    set always maybe
+step free from a.txt
+    run cp {in} {out}/{name}
+    set other x
+step fine from a.txt
+    run cp {in} {out}
+    set always no

@@ -17,9 +17,15 @@ check: (host: blocking.host, memory: lifetime.memory, file: []u8,
     mut wrong: bool = false
     for how in vec.used(into.rules) do
         if how.run_number == 0 then
-            report.at_line(host, codes.rule_runs_nothing, file, how.number,
-                           ["rule `", how.name,
-                            "` has no `run` line; say what it runs with `run PROGRAM WORDS...`"])
+            if how.own then
+                report.at_line(host, codes.rule_runs_nothing, file, how.number,
+                               ["step `", how.name,
+                                "` names no rule and has no `run` line of its own; name its rule after its name, or say what it runs with `run PROGRAM WORDS...`"])
+            else
+                report.at_line(host, codes.rule_runs_nothing, file, how.number,
+                               ["rule `", how.name,
+                                "` has no `run` line; say what it runs with `run PROGRAM WORDS...`"])
+            end if
             wrong = true
             continue
         end if
@@ -47,7 +53,11 @@ check: (host: blocking.host, memory: lifetime.memory, file: []u8,
             end loop
         end for
         for item in vec.used(how.sets) do
-            if not uses(how, item.name) then
+            if strings.same(item.name, always) then
+                report.at_line(host, codes.line_shape, file, item.number,
+                               ["`set always` belongs to a step: it says that this step runs every time; put it under the steps that need it"])
+                wrong = true
+            elsif not uses(how, item.name) then
                 report.at_line(host, codes.placeholder, file, item.number,
                                ["nothing in rule `", how.name, "` uses `{",
                                 item.name,
@@ -110,8 +120,9 @@ check_step: (host: blocking.host, file: []u8, inout into: recipe,
               "a step's name becomes a directory, so it is letters, digits, `_`, `-` and `.`, and does not begin with `.`")
     try wants(host, file, taken.number, not strings.same(taken.name, packages),
               "`packages` is the input the tool supplies; give the step another name")
-    mut found: bool = false
+    mut found: bool = taken.own
     for how, at in vec.used(into.rules) do
+        continue when taken.own or how.own
         if strings.same(how.name, taken.rule_name) then
             slot.val.rule_at = at
             found = true
@@ -131,11 +142,18 @@ check_step: (host: blocking.host, file: []u8, inout into: recipe,
     end
     mut wrong: bool = false
     for item in vec.used(taken.sets) do
-        if not uses(how, item.name) then
+        if strings.same(item.name, always) then
+            if not strings.same(item.value, "yes")
+              and not strings.same(item.value, "no") then
+                report.at_line(host, codes.line_shape, file, item.number,
+                               ["`set always` takes `yes` or `no`: with `yes` the step runs every time, whatever the store keeps"])
+                wrong = true
+            end if
+        elsif not uses(how, item.name) then
             report.at_line(host, codes.placeholder, file, item.number,
-                           ["nothing in rule `", how.name, "` uses `{",
+                           ["nothing in ", kind_of(how), " `", how.name, "` uses `{",
                             item.name,
-                            "}`; check the name against the rule's `run` line or remove the `set`"])
+                            "}`; check the name against its `run` line or remove the `set`"])
             wrong = true
         end if
     end for
@@ -151,10 +169,14 @@ check_step: (host: blocking.host, file: []u8, inout into: recipe,
             _ = value_of(how, taken, name) else (problem)
                 _ = problem
                 report.at_line(host, codes.placeholder, file, taken.number,
-                               ["rule `", how.name, "` uses `{", name,
-                                "}`, and step `", taken.name,
-                                "` gives it no value; write `set ", name,
-                                " VALUE` under the step or under the rule"])
+                               [kind_of(how), " `", how.name, "` uses `{", name,
+                                if how.own then "}` and" else "}`, and step `" end if,
+                                if how.own then "" else taken.name end if,
+                                if how.own then "" else "`" end if,
+                                " gives it no value; write `set ", name,
+                                if how.own then " VALUE` under the step"
+                                else " VALUE` under the step or under the rule"
+                                end if])
                 wrong = true
                 ""
             end

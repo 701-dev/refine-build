@@ -1,0 +1,6 @@
+-- A step that names no rule and runs nothing, and `set always` where it
+-- does not belong.
+rule copy
+    run cp {in} {out}
+    set always yes
+step lone

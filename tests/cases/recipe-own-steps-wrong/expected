@@ -1,0 +1,4 @@
+error[RB0103]: landin.recipe:6: `set always` takes `yes` or `no`: with `yes` the step runs every time, whatever the store keeps
+error[RB0302]: landin.recipe:9: nothing in step `free` uses `{other}`; check the name against its `run` line or remove the `set`
+error[RB0302]: landin.recipe:7: step `free` uses `{name}` and gives it no value; write `set name VALUE` under the step
+[exit 1]

@@ -1,0 +1,10 @@
+-- A step with a `run` line of its own names no rule: what the lines
+-- themselves get wrong.
+rule from
+rule with
+    run echo hi
+step both
+    run echo one
+    run echo two
+step named copy
+    run echo three
